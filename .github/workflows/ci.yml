@@ -1,0 +1,24 @@
+# main에 push하거나 PR을 열면 테스트를 돌린다. 결과는 커밋 옆 체크 표시로 보인다.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: 의존성 설치
+        run: pip install -r requirements-dev.txt
+      - name: 테스트
+        run: python -m pytest -q

@@ -1,0 +1,26 @@
+# Render Blueprint. 저장소 루트(= backend 폴더 내용)에 두고 Render에서 New → Blueprint로 연결한다.
+# 비밀 값(sync: false)은 Render 화면에서 직접 넣는다. 저장소에는 값을 적지 않는다.
+services:
+  - type: web
+    name: watchmate-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DATABASE_URL        # Neon 연결 문자열
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEMO_USERNAME
+        value: demo
+      - key: DEMO_PASSWORD       # 심사용 테스트 계정 비밀번호(제출 폼에 적는 값)
+        sync: false
+      - key: CORS_ORIGINS        # 예: https://watchmate.vercel.app
+        sync: false
+      - key: MODEL_PATH
+        value: models/presence_model.joblib
+      - key: ALLOW_SYNTHETIC_DEMO
+        value: "0"

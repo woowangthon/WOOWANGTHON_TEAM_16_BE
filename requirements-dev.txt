@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1
+# 수집 도구(tools/collector.py)
+pyserial==3.5
+# 개발용 합성 시나리오 그림(tools/make_dev_scenario.py)
+matplotlib==3.11.2
