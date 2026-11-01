@@ -1,0 +1,21 @@
+menu "Watchmate CSI node"
+
+    config WM_UART_FALLBACK
+        bool "게이트웨이가 없으면 원본 csi_recv처럼 USB로 CSI_DATA 줄을 찍는다"
+        default y
+        help
+            켜 두면 게이트웨이 없이 USB로 꽂아도 기존 collector.py check/session이 그대로 된다.
+
+    config WM_QUEUE_LEN
+        int "게이트웨이로 보내기 전 쌓아 두는 CSI 개수"
+        range 4 64
+        default 24
+
+    config WM_UPLINK_RATE
+        hex "게이트웨이로 보낼 때 HT40 전송 속도(wifi_phy_rate_t 값)"
+        default 0x12
+        help
+            0x10 MCS0, 0x11 MCS1, 0x12 MCS2(기본), 0x13 MCS3, 0x14 MCS4 (모두 long GI).
+            게이트웨이가 멀어서 실패가 많으면 낮추고, 가까우면 높여 전파 점유를 줄인다.
+
+endmenu
