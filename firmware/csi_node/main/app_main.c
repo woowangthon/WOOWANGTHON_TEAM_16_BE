@@ -5,8 +5,9 @@
  * CSI를 재는 부분(채널 11·HT40, CSI 설정, 이득 보정, TX-1 MAC 필터)은 원본과 같게 두고,
  * 결과를 내보내는 길만 바꿨다.
  *
- *   게이트웨이가 보이면  → CSI 한 건마다 ESP-NOW로 게이트웨이에 보낸다(UART에는 상태 줄만).
- *   게이트웨이가 안 보이면 → 원본 csi_recv와 똑같은 CSI_DATA 줄을 UART로 찍는다(USB 수집 그대로 가능).
+ *   게이트웨이가 보이면 → CSI 한 건마다 ESP-NOW로 게이트웨이에 보낸다.
+ *   그리고 기본 설정(WM_UART_ALWAYS)에서는 늘 원본 csi_recv와 똑같은 CSI_DATA 줄을 UART(USB)로도 찍는다.
+ *   그래서 무선이 안 되는 날에는 USB 케이블만 꽂으면 기존 수집 도구가 그대로 동작한다.
  *
  * 원본과 달라진 점:
  *   - 수신 보드의 MAC을 송신 MAC(1a:00:...)으로 바꾸지 않는다. 노드마다 공장 MAC을 써야
@@ -174,6 +175,8 @@ static void add_gateway_peer(const uint8_t mac[6])
 
 /* ------------------------------------------------------------------ CSI 콜백(원본과 같은 측정·보정) */
 
+static void queue_for_gateway(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain);
+
 static void print_csi_line_like_csi_recv(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain,
                                          uint8_t agc_gain, int8_t fft_gain, bool first)
 {
@@ -232,14 +235,27 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     s_count++;
     s_csi_count++;
 
-    if (!gateway_alive()) {
-#if CONFIG_WM_UART_FALLBACK
+    bool gw = gateway_alive();
+#if CONFIG_WM_UART_ALWAYS
+    bool print = true;          /* 케이블만 꽂으면 바로 유선 수집이 되도록 늘 USB로도 찍는다 */
+#elif CONFIG_WM_UART_FALLBACK
+    bool print = !gw;           /* 게이트웨이가 없을 때만 USB로 찍는다 */
+#else
+    bool print = false;
+#endif
+
+    if (gw) {
+        queue_for_gateway(info, rx_id, compensate_gain);  /* 먼저 큐에 넣어 무선 전송이 USB 출력을 기다리지 않게 한다 */
+    }
+    if (print) {
         print_csi_line_like_csi_recv(info, rx_id, compensate_gain, agc_gain, fft_gain, !s_header_printed);
         s_header_printed = true;
-#endif
-        return;
     }
+}
 
+static void queue_for_gateway(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain)
+{
+    const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
     uint16_t n = info->len > WM_CSI_MAX_LEN ? WM_CSI_MAX_LEN : info->len;
     csi_item_t item;
     wm_csi_pkt_t *pkt = (wm_csi_pkt_t *)item.buf;
@@ -343,8 +359,7 @@ static void status_task(void *arg)
                      s_send_fail, s_queue_drop, s_nomem_drop);
         } else {
             ESP_LOGW(TAG, "노드 " MACSTR " | 게이트웨이를 찾는 중 | CSI %.1f Hz%s",
-                     MAC2STR(my_mac), (csi - last_csi) / 5.0,
-                     CONFIG_WM_UART_FALLBACK ? " (USB로 CSI_DATA 출력 중)" : "");
+                     MAC2STR(my_mac), (csi - last_csi) / 5.0, " (USB로 CSI_DATA 출력 중)");
         }
         last_csi = csi;
         last_sent = sent;

@@ -1,10 +1,16 @@
 menu "Watchmate CSI node"
 
-    config WM_UART_FALLBACK
-        bool "게이트웨이가 없으면 원본 csi_recv처럼 USB로 CSI_DATA 줄을 찍는다"
+    config WM_UART_ALWAYS
+        bool "게이트웨이로 보내면서 USB로도 늘 CSI_DATA 줄을 찍는다"
         default y
         help
-            켜 두면 게이트웨이 없이 USB로 꽂아도 기존 collector.py check/session이 그대로 된다.
+            켜 두면 USB 케이블만 꽂으면 바로 기존 collector.py check/session이 된다(게이트웨이를 끌 필요 없음).
+            원본 csi_recv처럼 USB 출력이 초당 측정 수의 상한(약 70Hz)이 되므로, 유선과 무선의 초당 수도 같아진다.
+
+    config WM_UART_FALLBACK
+        bool "(WM_UART_ALWAYS를 끈 경우) 게이트웨이가 없을 때만 USB로 찍는다"
+        depends on !WM_UART_ALWAYS
+        default y
 
     config WM_QUEUE_LEN
         int "게이트웨이로 보내기 전 쌓아 두는 CSI 개수"
