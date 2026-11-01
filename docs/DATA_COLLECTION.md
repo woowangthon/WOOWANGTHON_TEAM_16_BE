@@ -1,0 +1,148 @@
+# ESP32 CSI 데이터 수집 절차
+
+사람 판별 모델의 학습·검증 데이터와, 심사위원이 볼 녹화 시나리오를 같은 공간에서 모으는 방법입니다.
+AI 활용도와 구현 완성도 점수가 모두 이 데이터에 걸려 있으니 보드를 받은 주에 1차 수집을 합니다.
+
+## 1. 준비물
+
+| 항목 | 수량 | 메모 |
+|---|---|---|
+| ESP32-S3-N16R8 개발보드(DevKitC-1 호환, USB-C 2개) | 5개 | 송신 1, 수신 3(301호·302호·복도), 예비 1. 팀은 쿠팡 PP-A912 한 상품으로 5개를 샀습니다 |
+| USB-C 데이터 케이블 | 보드 수만큼 | 충전 전용 케이블은 포트가 안 잡힙니다 |
+| 노트북 | 1~2대 | 수신 보드 3개를 USB로 연결(허브 사용 가능) |
+| 충전기 또는 보조배터리 | 1 | 송신 보드 전원 |
+| 줄자, 마스킹테이프, 휴대폰 | | 방 크기 측정, 보드 자리 표시, 배치 사진 |
+
+## 2. 펌웨어
+
+펌웨어는 Espressif의 [esp-csi](https://github.com/espressif/esp-csi) 시작 예제를 고치지 않고 씁니다.
+2026-10-31에 커밋 `8633d67`(2026-04-22)의 코드를 직접 열어 확인한 동작은 이렇습니다.
+
+| 예제 | 하는 일 |
+|---|---|
+| `csi_send` | 채널 11, 40MHz 폭(HT40)으로 ESP-NOW 패킷을 초당 100개 보냅니다. 패킷마다 번호를 넣고, 송신 MAC은 `1a:00:00:00:00:00`입니다 |
+| `csi_recv` | 그 MAC의 패킷만 골라 CSI를 `CSI_DATA,...` 한 줄로 시리얼(UART0, 921600bps)에 내보냅니다. 처음에 필드 이름 줄(`type,id,mac,rssi,...`)을 한 번 찍습니다 |
+| `csi_recv`의 이득 보정 | ESP32-S3에서는 수신 이득을 보정한 값을 내보내고, 매 줄 앞에 `compensate_gain ...` 로그를 찍습니다. 처음 100개 패킷으로 기준을 잡습니다 |
+
+- 한 줄에 값이 수백 개라 921600bps로는 초당 100줄을 다 내보내지 못합니다. 초당 수십 줄이 나오면 정상입니다.
+- 수집 도구는 로그 줄을 걸러 내고, 줄의 `len` 필드와 실제 값 개수가 다르면(전송 중 잘림) 그 줄을 버립니다.
+- 값은 서브캐리어마다 [허수, 실수] 순서입니다(esp-csi 예제 설명). 우리는 진폭만 씁니다.
+
+보드 쪽에서 알아 둘 것:
+
+- USB-C 포트가 두 개입니다. 시리얼 변환 칩(CH343)을 거치는 포트로 펌웨어를 올리고 CSI를 받습니다. 장치 관리자에 `CH343`이 들어간 COM 포트로 보이는 쪽입니다.
+- 펌웨어가 안 올라가면 BOOT를 누른 채 RST를 눌렀다 떼서 다운로드 모드로 들어갑니다.
+
+올리는 순서(Windows):
+
+1. [ESP-IDF 다운로드 페이지](https://dl.espressif.com/dl/esp-idf/)에서 ESP-IDF v5.5 계열 Offline installer를 받아 `C:\Espressif`처럼 띄어쓰기·한글 없는 짧은 경로에 설치합니다. 예제 설정 파일은 ESP-IDF 5.5.0으로 만들어졌습니다.
+2. ESP-IDF PowerShell에서 `git clone https://github.com/espressif/esp-csi.git`
+3. 보드 없이 미리 빌드합니다. 첫 빌드 때 예제가 쓰는 부품(`esp_csi_gain_ctrl`)을 인터넷에서 받습니다.
+
+   ```
+   cd esp-csi\examples\get-started\csi_send
+   idf.py set-target esp32s3
+   idf.py build
+   cd ..\csi_recv
+   idf.py set-target esp32s3
+   idf.py build
+   ```
+
+4. 송신 보드: `csi_send` 폴더에서 `idf.py -p COM5 flash monitor`. 로그에 `send_frequency: 100`이 보이면 `Ctrl+]`로 닫습니다.
+5. 수신 보드 4개(수신 3, 예비 1): `csi_recv` 폴더에서 `idf.py -p COM6 flash`. 포트만 바꿔 반복합니다.
+6. 일반 PowerShell(BE 저장소 폴더, `.venv`를 켠 상태)에서 `python tools/collector.py check --port COM6 --port COM7 --port COM8`로 세 보드를 한 번에 점검합니다. 모두 `정상`이고 값 개수가 같아야 합니다.
+7. 예제의 채널·전송 주기는 바꾸지 않습니다. 꼭 바꿔야 하면 `csi_send`와 `csi_recv` 두 파일을 똑같이 고치고 그날 기준선부터 다시 찍습니다. 펌웨어 설정이 바뀌면 서브캐리어 수가 달라지고, 서버는 기준선과 개수가 다른 프레임을 버립니다.
+8. 수집 일지에 esp-csi 커밋, ESP-IDF 버전, 보드별 RSSI를 적습니다.
+
+## 3. 공간과 배치
+
+- 인접한 방 두 개와 복도를 씁니다. 이 공간이 그대로 데모 평면도가 됩니다. 사용 허가를 먼저 받습니다.
+- 줄자로 방 크기를 재고 간단한 평면도를 PNG로 그립니다. 웹의 건물 설정에 그대로 올립니다.
+- 처음 배치안: 송신 보드는 복도의 두 방 문 사이, 수신 보드는 각 방 안쪽과 복도 끝. 모두 바닥에서 1m 안팎입니다. 사람이 있을 자리가 송신→수신 경로 근처에 오도록 잡는 것이 원칙이고, 송신과 수신 보드는 1m 이상 띄웁니다(esp-csi 예제 설명). 첫날 결과를 보고 고쳐도 됩니다.
+- 보드 자리를 테이프로 표시하고 사진을 찍습니다. 다음 수집일에도 같은 자리에 둡니다. 자리를 옮긴 노드는 기준선을 다시 잡아야 합니다.
+- 노드 이름은 웹에 등록할 이름과 똑같이 씁니다: `TX-1`, `RX-301`, `RX-302`, `RX-COR`.
+
+## 4. 라벨 규칙
+
+라벨은 **그 수신 노드가 맡은 구역에서 일어난 일**입니다. 같은 장면이라도 노드마다 라벨이 다릅니다.
+이 규칙을 지켜야 "옆방 사람을 이 방으로 잘못 표시하는 비율"을 따로 잴 수 있습니다.
+기본 장면 목록 [docs/plans/day_plan.csv](plans/day_plan.csv)가 이 표와 같습니다.
+
+| 장면 | RX-301 | RX-302 | RX-COR |
+|---|---|---|---|
+| 모두 비어 있음 | `empty` | `empty` | `empty` |
+| 301호에 1명이 바닥에 누움 | `lying` | `neighbor` | `neighbor` |
+| 302호에 1명이 서 있음 | `neighbor` | `standing` | `neighbor` |
+| 302호에 1명이 의자에 앉음 | `neighbor` | `sitting` | `neighbor` |
+| 복도를 1명이 걸어감 | `neighbor` | `neighbor` | `walking` |
+| 302호에 2명 | `neighbor` | `two_people` | `neighbor` |
+| 301호 가구·문 뒤에 1명 | `behind_wall` | `neighbor` | `neighbor` |
+| 301호 선풍기만 켜 둠(사람은 모두 밖) | `fan` | `empty` | `empty` |
+| 복도에 선 사람이 301호 문을 여닫음 | `door` | `neighbor` | `standing` |
+| 302호에서 드라이어 열풍만(사람은 문 밖에서 지켜봄) | `neighbor` | `heat` | `standing` |
+
+라벨 목록: 사람 있음 `standing` `sitting` `lying` `still` `moving` `walking` `behind_wall` `two_people`,
+사람 없음 `empty` `neighbor` `fan` `door` `heat`.
+
+## 5. 하루 수집 순서 (약 90분)
+
+1. **설치·확인 (15분)** — 보드를 자리에 두고 `python tools/collector.py check --port ... --port ... --port ...`로 세 보드를 점검합니다. 모두 `정상`이어야 합니다.
+2. **장면 녹화 (약 60분)** — `session` 명령이 장면 목록을 차례로 보여 주고, Enter를 누를 때마다 세 노드를 같은 시각에 녹화합니다. 첫 장면과 마지막 장면은 모두 밖에 나간 `empty`(3분)입니다. 학습 명령은 그날 첫 `empty` 세션으로 기준선을 잡습니다.
+3. **정리** — 녹화 폴더의 `session_log.csv`를 Notion 데이터 수집 일지에 옮기고, `data/sessions/<날짜>` 폴더를 팀 드라이브에 올립니다. 하루치는 약 350MB입니다(값 384개 기준).
+
+서로 다른 날 3회 이상, 사람은 2명 이상이 번갈아 맡습니다. 학습 명령은 날짜 하나를 통째로 빼고 평가하므로 하루치만으로는 믿을 만한 숫자가 나오지 않습니다.
+
+## 6. 녹화 명령
+
+처음에는 장면 두 개짜리 시험 목록으로 연습합니다.
+
+```powershell
+python tools/collector.py session --plan docs/plans/try_plan.csv --day test --out ..\data\test `
+  --node RX-301=COM6 --node RX-302=COM7 --node RX-COR=COM8
+```
+
+수집 날에는 기본 장면 목록으로 진행합니다. `--notes`는 그날 모든 세션의 메타데이터에 들어갑니다.
+
+```powershell
+python tools/collector.py session --plan docs/plans/day_plan.csv --day 2026-11-01 --out ..\data\sessions\2026-11-01 `
+  --node RX-301=COM6 --node RX-302=COM7 --node RX-COR=COM8 --notes "문 열림, 참여 A·B"
+```
+
+- 장면이 끝날 때마다 Enter(다음), `r`(다시 찍기, 방금 파일을 지움), `q`(끝내기)를 고릅니다. 시작 전에 `s`를 누르면 그 장면을 건너뜁니다.
+- 중간에 끝냈으면 `--start <장면 이름>`으로 이어서 합니다. 녹화 도중 Ctrl+C로 멈춘 장면은 파일을 남기지 않습니다.
+- 녹화 중 다른 사람이 지나가거나 문이 열리면 `r`로 다시 찍습니다.
+- 장면을 바꾸고 싶으면 장면 목록 CSV를 복사해 고칩니다. 열은 `scene,description,people,seconds`와 노드 이름이고, 노드 칸에는 라벨을 씁니다. Excel에서 저장한 CSV도 읽습니다.
+- 장면 하나만 따로 찍을 때는 `record`를 씁니다.
+
+  ```powershell
+  python tools/collector.py record --day 2026-11-01 --seconds 150 --people 1 `
+    --notes "A, 301호 창가 바닥" --out ..\data\sessions\2026-11-01 `
+    --rx COM6:RX-301:lying --rx COM7:RX-302:neighbor --rx COM8:RX-COR:neighbor
+  ```
+
+- 파일 이름은 `날짜_노드_라벨_시각.csv`와 같은 이름의 `.json`(메타데이터)입니다.
+
+## 7. 학습과 확인
+
+```bash
+python -m app.ml.train --data ../data/sessions --out models/presence_model.joblib --source-note "공학관 301·302호와 복도, 11/1~11/7 수집"
+```
+
+- 수집한 날이 하루뿐이면 시간 구간으로 나눠 평가하는데, 이 숫자는 실제보다 좋게 나옵니다. 발표에는 이틀 이상으로 한 하루 단위 교차검증 결과만 씁니다.
+- 결과는 `models/presence_model.card.json`에 저장되고, 서버를 다시 띄우면 웹의 "AI 검증" 화면에 그대로 나옵니다.
+- 모델 파일과 카드는 저장소에 올립니다. 원시 세션(`data/`)은 올리지 않습니다.
+
+## 8. 심사용 녹화 시나리오
+
+학습용 세션과 별도로, 처음부터 끝까지 이어지는 장면을 한 번 녹화합니다.
+
+1. 모두 나간 상태에서 노드 셋을 `empty`로 60초 녹화합니다(기준선용).
+2. 이어서 90초 안팎의 장면을 녹화합니다. 예: 0~30초 모두 비어 있음 → 30초에 1명이 302호로 들어가 바닥에 눕는다. 한 사람이 스톱워치로 실제 시각을 적습니다(정답 타임라인).
+3. 파일을 `sample_data/<시나리오 id>/`로 옮기고 `RX-301_cal.csv`, `RX-301_stream.csv`처럼 이름을 바꿉니다. 이 녹화본은 학습 데이터 폴더에 넣지 않습니다.
+4. `sample_data/README.md` 형식대로 `scenario.json`을 쓰고 `"synthetic": false`로 둡니다.
+
+## 9. 안전과 동의
+
+- 실제 불이나 연기는 쓰지 않습니다.
+- 드라이어는 사람이 문 밖에서 지켜보는 상태로 3분 안에 끕니다.
+- 참여자에게 무엇을 기록하는지(Wi-Fi 신호, 자세 라벨) 설명하고 동의를 받습니다. 정답 확인용으로 휴대폰 영상을 찍는다면 팀 안에서만 보관합니다.

@@ -1,0 +1,12 @@
+﻿scene,description,people,seconds,RX-301,RX-302,RX-COR
+start_empty,모두 방과 복도 밖으로 나간다(그날 기준선),0,180,empty,empty,empty
+lying_301,301호에 1명이 바닥에 눕는다. 움직이지 않고 평소대로 숨만 쉰다,1,150,lying,neighbor,neighbor
+standing_302,302호에 1명이 가만히 서 있다,1,150,neighbor,standing,neighbor
+sitting_302,302호에 1명이 의자에 앉아 있다,1,150,neighbor,sitting,neighbor
+walking_cor,복도를 1명이 천천히 왕복한다,1,150,neighbor,neighbor,walking
+two_302,302호에 2명이 서 있거나 앉아 있다,2,150,neighbor,two_people,neighbor
+behind_301,301호 가구나 문 뒤에 1명이 앉는다(수신 보드에서 직접 안 보이는 자리),1,150,behind_wall,neighbor,neighbor
+fan_301,301호에 선풍기만 켜 둔다. 사람은 모두 방과 복도 밖,0,150,fan,empty,empty
+door_301,복도에 선 1명이 301호 문을 5초 간격으로 여닫는다,1,150,door,neighbor,standing
+heat_302,302호에서 드라이어 열풍만 켠다. 1명이 302호 문 밖 복도에서 지켜본다,1,150,neighbor,heat,standing
+end_empty,모두 다시 방과 복도 밖으로 나간다,0,180,empty,empty,empty

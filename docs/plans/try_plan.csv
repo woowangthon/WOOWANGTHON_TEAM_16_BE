@@ -1,0 +1,3 @@
+﻿scene,description,people,seconds,RX-301,RX-302,RX-COR
+start_empty,모두 방과 복도 밖으로 나간다(시험용 기준선),0,40,empty,empty,empty
+lying_301,301호에 1명이 바닥에 눕는다(시험),1,40,lying,neighbor,neighbor
