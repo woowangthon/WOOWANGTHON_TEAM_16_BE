@@ -88,18 +88,24 @@ AI 활용도와 구현 완성도 점수가 모두 이 데이터에 걸려 있으
 
 1. **설치·확인 (15분)** — 보드를 자리에 두고 `python tools/collector.py check --port ... --port ... --port ...`로 세 보드를 점검합니다. 모두 `정상`이어야 합니다.
 2. **장면 녹화 (약 60분)** — `session` 명령이 장면 목록을 차례로 보여 주고, Enter를 누를 때마다 세 노드를 같은 시각에 녹화합니다. 첫 장면과 마지막 장면은 모두 밖에 나간 `empty`(3분)입니다. 학습 명령은 그날 첫 `empty` 세션으로 기준선을 잡습니다.
-3. **정리** — 녹화 폴더의 `session_log.csv`를 Notion 데이터 수집 일지에 옮기고, `data/sessions/<날짜>` 폴더를 팀 드라이브에 올립니다. 하루치는 약 350MB입니다(값 384개 기준).
+3. **비교표** — `python tools/collector.py compare --data ..\data\sessions\<날짜>`로 장면마다 빈 방 대비 변화를 봅니다. `end_empty`가 `start_empty`와 크게 다르면(빈 방 `확인`) 그날 기준선이 흔들린 것이니 수집 일지에 적습니다.
+4. **정리** — 녹화 폴더의 `session_log.csv`를 Notion 데이터 수집 일지에 옮기고, `data/sessions/<날짜>` 폴더를 팀 드라이브에 올립니다. 하루치는 약 350MB입니다(값 384개 기준).
 
 서로 다른 날 3회 이상, 사람은 2명 이상이 번갈아 맡습니다. 학습 명령은 날짜 하나를 통째로 빼고 평가하므로 하루치만으로는 믿을 만한 숫자가 나오지 않습니다.
 
 ## 6. 녹화 명령
 
-처음에는 장면 두 개짜리 시험 목록으로 연습합니다.
+처음에는 시험 목록(`docs/plans/try_plan.csv`, 5장면·약 3분)으로 연습하면서 보드 자리를 점검합니다. 빈 방 뒤에 **구역마다 한 명이 40초씩 걸어 다니는 장면**이 들어 있습니다. 가장 큰 움직임에도 그 구역 노드의 신호가 안 바뀌면 보드 자리가 잘못된 것이라, 하루치를 찍기 전에 고칠 수 있습니다.
 
 ```powershell
 python tools/collector.py session --plan docs/plans/try_plan.csv --day test --out ..\data\test `
   --node RX-301=COM6 --node RX-302=COM7 --node RX-COR=COM8
+
+# 비교표: 장면마다 그날 빈 방 대비 변화. walking_* 장면이 '정상'이어야 본 수집으로 넘어갑니다
+python tools/collector.py compare --data ..\data\test
 ```
+
+비교표에서 `확인`이 나오면 그 줄의 안내대로 보드 자리나 환경을 고치고 시험을 다시 찍습니다. 무선 노드는 포트 자리에 `gw`를 씁니다(`--node RX-301=gw`, [WIRELESS.md](WIRELESS.md)).
 
 수집 날에는 기본 장면 목록으로 진행합니다. `--notes`는 그날 모든 세션의 메타데이터에 들어갑니다.
 

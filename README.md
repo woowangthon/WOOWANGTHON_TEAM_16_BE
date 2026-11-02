@@ -38,12 +38,14 @@ app/
     model.py         2단계 사람 판별 모델 저장·로딩
     sessions.py      수집 세션 읽기, 라벨 정의
     train.py         학습·검증 명령(하루 단위 교차검증 → 모델 카드)
+    compare.py       비교표: 장면마다 그날 빈 방 대비 변화(1단계 계산만)
 firmware/
   csi_node/          무선 수신 노드(esp-csi csi_recv 기반, 측정값을 ESP-NOW로 게이트웨이에 전송)
   csi_gateway/       게이트웨이(노드들의 측정값을 받아 USB로 노트북에 전달)
   common/wm_proto.h  노드·게이트웨이·수집 도구가 함께 쓰는 데이터 형식
 tools/
-  collector.py       ESP32 시리얼·게이트웨이 → 보드 점검, 장면별 녹화, 서버 실시간 전송
+  collector.py       ESP32 시리얼·게이트웨이 → 보드 점검, 장면별 녹화, 비교표, 서버 실시간 전송
+nodes.csv            노드 이름표와 MAC(무선 노드를 이름으로 부를 때)
   make_dev_scenario.py  화면 개발용 합성 시나리오(배포에서는 꺼짐)
 models/              학습 결과(모델 파일 + 모델 카드 JSON)
 sample_data/         심사용 녹화 데이터 시나리오
@@ -145,11 +147,14 @@ python tools/collector.py check --port COM6 --port COM7 --port COM8
 python tools/collector.py session --plan docs/plans/day_plan.csv --day 2026-11-03 --out ../data/sessions/2026-11-03 \
     --node RX-301=COM6 --node RX-302=COM7 --node RX-COR=COM8
 
+# 비교표: 장면마다 그날 빈 방 대비 변화(보드 자리·기준선 점검, 학습 없이 몇 초)
+python tools/collector.py compare --data ../data/sessions/2026-11-03
+
 # 학습·검증 → models/presence_model.joblib + presence_model.card.json
 python -m app.ml.train --data ../data/sessions --out models/presence_model.joblib --source-note "공학관 301·302호, 11/3~11/7 수집"
 ```
 
-무선 노드를 게이트웨이로 받을 때는 포트 자리에 `gw:<노드 MAC>`을 쓰고 `--gateway COM7`을 붙입니다. 펌웨어 올리기와 무선 점검은 [docs/WIRELESS.md](docs/WIRELESS.md)에 있습니다.
+무선 노드를 게이트웨이로 받을 때는 포트 자리에 `gw:<노드 MAC>`을 쓰고 `--gateway COM7`을 붙입니다. 저장소 루트의 `nodes.csv`에 이름표와 MAC을 적어 두면 `--node RX-301=gw`처럼 이름으로 씁니다. 펌웨어 올리기와 무선 점검은 [docs/WIRELESS.md](docs/WIRELESS.md)에 있습니다.
 
 원시 세션(`data/`)은 저장소에 올리지 않고 팀 드라이브에 둡니다. 저장소에는 학습된 모델과 모델 카드, 시연용 녹화 시나리오만 올립니다.
 

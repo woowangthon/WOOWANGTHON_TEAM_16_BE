@@ -152,9 +152,20 @@ def test_gateway_command_lists_nodes(fake_gateway, capsys):
     row_a = next(line for line in out.splitlines() if line.startswith(MAC_A))
     row_b = next(line for line in out.splitlines() if line.startswith(MAC_B))
     assert "0.0%" in row_a and "384" in row_a
-    loss_b = float(row_b.split()[3].rstrip("%"))
+    loss_b = float(row_b.split()[4].rstrip("%"))  # MAC, 이름표, 받음, 초당, 잃음
     assert 5 <= loss_b <= 15
-    assert f"--node RX-???=gw:{MAC_A}" in out
+    assert f"RX-???,{MAC_A}" in out  # nodes.csv에 적을 줄을 알려 준다
+
+
+def test_gateway_command_shows_names_from_nodes_file(fake_gateway, tmp_path, capsys):
+    fake_gateway["nodes"] = {MAC_A: 40.0}
+    nodes = tmp_path / "nodes.csv"
+    nodes.write_text(f"node,mac\nRX-301,{MAC_A}\nRX-302,{MAC_B}\n", encoding="utf-8")
+    collector.main(["gateway", "--gateway", "FAKEGW", "--nodes", str(nodes), "--seconds", "1"])
+    out = capsys.readouterr().out
+    row_a = next(line for line in out.splitlines() if line.startswith(MAC_A))
+    assert "RX-301" in row_a
+    assert "안 들어오는 노드: RX-302" in out
 
 
 def test_session_over_gateway_records_each_node(fake_gateway, tmp_path):

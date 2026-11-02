@@ -29,6 +29,12 @@
   # 게이트웨이에 들어오는 노드 목록과 무선 손실 보기
   python tools/collector.py gateway --gateway COM7
 
+  # nodes.csv에 이름표와 MAC을 적어 두면 MAC 대신 이름을 쓴다(gw:RX-301, 또는 --node RX-301=gw)
+  python tools/collector.py check --gateway COM7 --port gw:RX-301 --port gw:RX-302 --port gw:RX-COR
+
+  # 비교표: 녹화 폴더의 장면마다 그날 빈 방 대비 변화(보드 자리·기준선 점검)
+  python tools/collector.py compare --data ../data/sessions/2026-11-04
+
   python tools/collector.py check --gateway COM7 --port gw:90:70:69:f7:fb:ec --port gw:90:70:69:aa:bb:cc
   python tools/collector.py session --gateway COM7 --plan docs/plans/day_plan.csv --day 2026-11-04 \
       --out ../data/sessions/2026-11-04 --node RX-301=gw:90:70:69:f7:fb:ec --node RX-302=gw:... --node RX-COR=gw:...
@@ -64,6 +70,8 @@ from app.ml.sessions import LABELS  # noqa: E402
 DEFAULT_BAUD = 921600  # csi_recv 예제의 sdkconfig.defaults(CONFIG_ESP_CONSOLE_UART_BAUDRATE)
 SEND_MAC = "1a:00:00:00:00:00"  # csi_send 예제가 쓰는 송신 MAC. csi_recv는 이 MAC의 패킷만 출력한다
 MIN_HZ = 10.0
+TX_MIN_HZ = 50.0  # TX-1은 초당 100개를 보낸다. 11/1 보조배터리로 켰을 때 약 23개로 떨어졌다
+NODES_FILE = Path(__file__).resolve().parent.parent / "nodes.csv"
 
 
 def _serial_factory(port: str, baud: int, timeout: float):
@@ -332,11 +340,81 @@ class _GatewayNodePort:
             self.hub.release()
 
 
-def _gateway_node_port(mac_text: str) -> _GatewayNodePort:
+_NODES = {"path": Path(os.environ.get("WATCHMATE_NODES", str(NODES_FILE)))}
+
+
+def _is_mac(text: str) -> bool:
+    hexs = "".join(ch for ch in text.lower() if ch in "0123456789abcdef")
+    return len(hexs) == 12 and all(ch in "0123456789abcdefABCDEF:-" for ch in text)
+
+
+def load_node_names(path: Path | None = None) -> dict[str, str]:
+    """nodes.csv(node,mac)를 읽어 {이름표: MAC}을 돌려준다. MAC이 빈 줄은 아직 안 적은 것으로 본다.
+
+    #으로 시작하는 줄은 설명이다. 같은 이름이나 같은 MAC이 두 번 나오면 멈춘다(라벨이 엉뚱한 노드에 붙는 것을 막는다).
+    """
+    path = Path(path or _NODES["path"])
+    if not path.exists():
+        return {}
+    names: dict[str, str] = {}
+    lines = [ln for ln in _read_text(path).splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    for i, row in enumerate(csv.DictReader(lines), 2):
+        name = (row.get("node") or "").strip()
+        mac = (row.get("mac") or "").strip()
+        if not name:
+            continue
+        if name in names:
+            sys.exit(f"{path.name}에 {name}가 두 번 있습니다.")
+        if not mac:
+            continue
+        if not _is_mac(mac):
+            sys.exit(f"{path.name}의 {name} MAC '{mac}'이 MAC 형식이 아닙니다(예: 90:70:69:f7:fb:ec).")
+        mac = _norm_mac(mac)
+        if mac in names.values():
+            other = next(n for n, m in names.items() if m == mac)
+            sys.exit(f"{path.name}에서 {other}와 {name}의 MAC이 같습니다({mac}). 이름표를 다시 확인하세요.")
+        names[name] = mac
+    return names
+
+
+def resolve_gw(target: str) -> str:
+    """gw: 뒤의 글자(MAC 또는 nodes.csv의 이름표)를 MAC으로 바꾼다."""
+    if _is_mac(target):
+        return _norm_mac(target)
+    names = load_node_names()
+    if target in names:
+        return names[target]
+    path = _NODES["path"]
+    if not path.exists():
+        sys.exit(f"gw:{target}의 MAC을 찾을 nodes.csv가 없습니다({path}). MAC을 직접 쓰거나 nodes.csv를 만드세요.")
+    sys.exit(f"{path.name}에 {target}의 MAC이 없습니다. 노드에 펌웨어를 올릴 때 나온 MAC을 적어 주세요.")
+
+
+def node_port(node: str, port: str) -> str:
+    """--node 노드=포트의 포트를 정리한다. 'gw'만 쓰면 그 노드 이름표로 찾는다.
+
+    gw:<다른 이름표>나 nodes.csv에서 다른 이름표의 MAC을 주면 멈춘다. 장면 라벨이 엉뚱한 노드 파일에 붙는 것을 막는다.
+    """
+    if port.lower() == "gw":
+        return f"gw:{node}"
+    if port.lower().startswith("gw:"):
+        target = port[3:]
+        if _is_mac(target):
+            mac = _norm_mac(target)
+            owner = next((n for n, m in load_node_names().items() if m == mac), None)
+            if owner is not None and owner != node:
+                sys.exit(f"{node}에 {owner}의 MAC({mac})을 붙였습니다. nodes.csv와 명령의 이름표를 확인하세요.")
+        elif target != node:
+            sys.exit(f"{node}에 gw:{target}을 붙였습니다. 같은 이름표를 쓰거나 --node {node}=gw 로 쓰세요.")
+    return port
+
+
+def _gateway_node_port(target: str) -> _GatewayNodePort:
     if not _GATEWAY["port"]:
         sys.exit("무선 노드(gw:...)를 쓰려면 게이트웨이의 USB 포트를 --gateway로 알려 주세요(예: --gateway COM7).")
+    mac = resolve_gw(target)
     hub = _GatewayHub.get(_GATEWAY["port"], _GATEWAY["baud"])
-    return _GatewayNodePort(hub, _norm_mac(mac_text))
+    return _GatewayNodePort(hub, mac)
 
 
 def _close_all_gateways() -> None:
@@ -461,6 +539,12 @@ def _verdict(st: dict, baud: int) -> tuple[bool, list[str]]:
         span = max(st["seq"]) - min(st["seq"]) + 1
         tx = f" (송신 보드 약 {span / st['seconds']:.0f} Hz)"
     out.append(f"CSI {st['csi']}줄 / {st['seconds']:.0f}초 = {hz:.1f} Hz{tx}")
+    if len(st["seq"]) > 10:
+        tx_hz = (max(st["seq"]) - min(st["seq"]) + 1) / st["seconds"]
+        if tx_hz < TX_MIN_HZ:
+            ok = False
+            out.append(f"  경고: 송신 보드(TX-1)가 초당 약 {tx_hz:.0f}개만 보내고 있습니다(정상 약 100). "
+                       "TX-1을 보조배터리로 켰다면 충전기나 노트북 USB로 바꾸고 다시 점검하세요.")
     if hz < MIN_HZ:
         ok = False
         out.append(f"  경고: 초당 {MIN_HZ:.0f}줄보다 적습니다. 송신 보드 전원과 거리, USB 허브를 확인하세요.")
@@ -550,6 +634,7 @@ def _record_targets(args) -> list[tuple[str, str, str]]:
         if not (args.port and args.node and args.label):
             sys.exit("--port, --node, --label을 모두 주거나, --rx 포트:노드:라벨 을 노드마다 하나씩 주세요.")
         targets = [(args.port, args.node, args.label)]
+    targets = [(node_port(node, port), node, label) for port, node, label in targets]
     for _, node, label in targets:
         if label not in LABELS:
             sys.exit(f"{node}의 라벨 '{label}'은 쓸 수 없습니다. 다음 중 하나: {', '.join(sorted(LABELS))}")
@@ -699,7 +784,7 @@ def _parse_node_ports(specs: list[str]) -> dict[str, str]:
             sys.exit(f"--node는 노드=포트 형식입니다(예: --node RX-301=COM5). 받은 값: {s}")
         if node.strip() in out:
             sys.exit(f"{node.strip()}가 두 번 들어갔습니다.")
-        out[node.strip()] = port.strip()
+        out[node.strip()] = node_port(node.strip(), port.strip())
     return out
 
 
@@ -909,12 +994,21 @@ def cmd_gateway(args) -> None:
     if not rows:
         print("들어오는 노드가 없습니다. 노드에 csi_node를 올렸는지, 전원이 켜졌는지, TX-1이 켜졌는지 확인하세요.")
         sys.exit(1)
-    print(f"\n{'노드 MAC':<19}{'받음':>7}{'초당':>8}{'잃음':>8}{'값 개수':>8}{'게이트웨이 RSSI':>16}")
+    names = {m: n for n, m in load_node_names().items()}
+    print(f"\n{'노드 MAC':<19}{'이름표':<10}{'받음':>7}{'초당':>8}{'잃음':>8}{'값 개수':>8}{'게이트웨이 RSSI':>16}")
     for mac, got, hz, loss, length, rssi in rows:
-        print(f"{mac:<19}{got:>7}{hz:>8.1f}{loss:>8.1%}{length:>8}{rssi:>13.0f} dBm")
-    print("\n노드 이름표와 MAC을 짝지어 다른 명령에 씁니다. 예:")
-    for mac, *_ in rows:
-        print(f"  --node RX-???=gw:{mac}")
+        name = names.get(mac, "?")
+        print(f"{mac:<19}{name:<10}{got:>7}{hz:>8.1f}{loss:>8.1%}{length:>8}{rssi:>13.0f} dBm")
+    unknown = [mac for mac, *_ in rows if mac not in names]
+    missing = [n for n, m in sorted((n, m) for m, n in names.items()) if m not in {r[0] for r in rows}]
+    if missing:
+        print(f"\nnodes.csv에는 있는데 안 들어오는 노드: {', '.join(missing)} (전원·펌웨어·거리 확인)")
+    if unknown:
+        print(f"\nnodes.csv에 없는 MAC이 있습니다. 이름표를 확인하고 {_NODES['path'].name}에 적어 주세요:")
+        for mac in unknown:
+            print(f"  RX-???,{mac}")
+    else:
+        print("\n모든 노드가 이름표와 짝지어져 있습니다. 명령에는 --node RX-301=gw 또는 --port gw:RX-301 처럼 씁니다.")
 
 
 def cmd_send(args) -> None:
@@ -943,6 +1037,17 @@ def cmd_send(args) -> None:
     print("\n전송 끝")
 
 
+def cmd_compare(args) -> None:
+    # 비교표는 서버 설정 중 창 길이만 쓴다. 서버용 SECRET_KEY 안내가 섞여 나오지 않게 비어 있으면 채워 둔다.
+    os.environ.setdefault("SECRET_KEY", "collector-compare-local")
+    from app.ml.compare import main as compare_main  # 학습 코드(scikit-learn)는 이 명령에서만 읽는다
+
+    argv = ["--data", args.data] + [x for n in args.node for x in ("--node", n)]
+    code = compare_main(argv)
+    if code:
+        sys.exit(code)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="ESP32 CSI 수집 도구")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -950,6 +1055,7 @@ def main(argv: list[str] | None = None) -> None:
     gwp.add_argument("--gateway", default=os.environ.get("WATCHMATE_GATEWAY", ""),
                      help="무선 노드(gw:<MAC>)를 받는 게이트웨이의 USB 포트(예: COM7)")
     gwp.add_argument("--gateway-baud", type=int, default=GW_BAUD)
+    gwp.add_argument("--nodes", default="", help=f"이름표와 MAC 파일(기본 {NODES_FILE.name})")
 
     gw = sub.add_parser("gateway", parents=[gwp], help="게이트웨이로 들어오는 무선 노드 목록과 손실")
     gw.add_argument("--seconds", type=float, default=5)
@@ -994,6 +1100,10 @@ def main(argv: list[str] | None = None) -> None:
     lv.add_argument("--token", action="append", default=[], help="노드 토큰. --port와 같은 순서")
     lv.add_argument("--save-dir", default="")
 
+    cp = sub.add_parser("compare", help="비교표: 녹화 장면마다 그날 빈 방 대비 변화(보드 자리·기준선 점검)")
+    cp.add_argument("--data", required=True, help="세션 폴더(예: ../data/sessions/2026-11-04)")
+    cp.add_argument("--node", action="append", default=[], help="이 노드만(여러 번 가능)")
+
     sd = sub.add_parser("send", help="녹화 파일을 서버로 다시 보내기(개발용)")
     sd.add_argument("--file", required=True)
     sd.add_argument("--api", required=True)
@@ -1001,13 +1111,18 @@ def main(argv: list[str] | None = None) -> None:
     sd.add_argument("--speed", type=float, default=1.0)
 
     args = ap.parse_args(argv)
+    saved = dict(_GATEWAY), dict(_NODES)
     if getattr(args, "gateway", None) is not None:
         _GATEWAY["port"], _GATEWAY["baud"] = args.gateway, args.gateway_baud
+    if getattr(args, "nodes", ""):
+        _NODES["path"] = Path(args.nodes)
     try:
         {"ports": cmd_ports, "check": cmd_check, "session": cmd_session, "record": cmd_record,
-         "live": cmd_live, "send": cmd_send, "gateway": cmd_gateway}[args.cmd](args)
+         "live": cmd_live, "send": cmd_send, "gateway": cmd_gateway, "compare": cmd_compare}[args.cmd](args)
     finally:
         _close_all_gateways()
+        _GATEWAY.update(saved[0])
+        _NODES.update(saved[1])
 
 
 if __name__ == "__main__":
