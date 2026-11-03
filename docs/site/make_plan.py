@@ -19,7 +19,7 @@ S = 7.35 / 171          # m/px: 223호 가로 7.35m = 171px (세로 5.80m = 135p
 X0 = 92
 def X(px): return (px - X0) * S
 
-BOT, COR, TOP = 4.80, 2.25, 5.80        # 아래 줄 깊이, 복도 폭, 위 줄 깊이(m)
+BOT, COR, TOP = 4.80, 2.34, 5.80        # 아래 줄 깊이, 복도 폭(실측 2.34m), 위 줄 깊이(m)
 YB0, YC0, YT0 = 0.0, BOT, BOT + COR
 YT1 = YT0 + TOP
 
@@ -55,7 +55,7 @@ def draw(ax, annotate: bool):
     # 축척 막대 5m
     ax.plot([X(140), X(140) + 5], [-3.2, -3.2], color=WALL, lw=3)
     ax.text(X(140) + 2.5, -3.75, "5 m", ha="center", va="top", fontsize=10, color=TXT)
-    ax.text(X(1765), -3.75, "S4-1동 2층 · 피난안내도를 223호 실측(7.35×5.80m) 눈금으로 환산, 오차 ±5%",
+    ax.text(X(1765), -3.75, "S4-1동 2층 · 피난안내도를 223호 실측(7.35×5.80m) 눈금으로 환산(복도 폭 2.34m 실측), 나머지 오차 ±5%",
             ha="right", va="top", fontsize=9, color="#5d636b")
 
     if annotate:
@@ -68,7 +68,7 @@ def draw(ax, annotate: bool):
         ax.text(X(1124) - 0.15, YB0 + BOT / 2, "≈4.7 m", ha="right", va="center", fontsize=8, rotation=90)
         ax.text(X(1009) + 0.2, YT0 + TOP / 2, "5.80 m(실측)", ha="left", va="center", fontsize=8, rotation=90)
         ax.annotate("", xy=(X(1670), YC0), xytext=(X(1670), YT0), arrowprops=dict(arrowstyle="<->", color=WALL, lw=1))
-        ax.text(X(1670) - 0.25, YC0 + COR / 2, "복도 ≈2.25 m", ha="right", va="center", fontsize=9)
+        ax.text(X(1670) - 0.25, YC0 + COR / 2, "복도 2.34 m(실측)", ha="right", va="center", fontsize=9)
         # 배치 예시
         tx = (X(1006), YC0 + COR / 2)
         nodes = {"RX-301": ((X(838) + X(1009)) / 2 - 1.2, YT0 + 1.7), "RX-302": ((X(1004) + X(1124)) / 2, 1.3),
