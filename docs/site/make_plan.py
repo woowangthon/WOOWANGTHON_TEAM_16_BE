@@ -86,6 +86,49 @@ def draw(ax, annotate: bool):
                 "문 위치를 보고 조정", ha="left", va="bottom", fontsize=9, color="#5d636b")
 
 
+def draw_layout_1103(ax):
+    """2026-11-03 실제 배치(팀 스케치를 같은 축척으로 옮김)와 대기 장소."""
+    draw(ax, False)
+    for n, c in (("223", "#f4c2bd"), ("224", "#f7dcae")):
+        x0, x1 = [(a, b) for a, b, m in top + bot if m == n][0]
+        y0, y1 = (YT0, YT1) if n == "223" else (YB0, YC0)
+        ax.add_patch(Rectangle((X(x0), y0), X(x1) - X(x0), y1 - y0, facecolor=c, edgecolor=WALL, lw=1.6, zorder=1.5))
+    ax.add_patch(Rectangle((X(838), YC0 - 0.05), X(1009) - X(838) + 0.3, COR + 0.1, facecolor="#fdeee0", edgecolor="none", zorder=0.5))
+    tx = (X(1006), YC0 + COR * 0.42)
+    nodes = {"RX-301": (X(975), YT1 - 0.47 * TOP), "RX-302": (X(1052), 0.29 * BOT), "RX-COR": (X(901), YC0 + COR * 0.38)}
+    for name, (x, y) in nodes.items():
+        ax.plot([tx[0], x], [tx[1], y], ls="--", color="#c8281c", lw=1)
+        ax.plot(x, y, "o", ms=9, color=TXT, zorder=5)
+        ax.text(x, y - 0.4, name, ha="center", va="top", fontsize=9, fontweight="bold", zorder=5)
+    ax.plot(*tx, "D", ms=10, color="#c8281c", zorder=5)
+    ax.text(tx[0] + 0.3, tx[1] + 0.3, "TX-1", ha="left", va="bottom", fontsize=9, fontweight="bold", color="#c8281c")
+    gw = (X(1182), YC0 + COR / 2)
+    ax.plot(*gw, "s", ms=9, color="#2557b8", zorder=5)
+    ax.text(gw[0], gw[1] - 0.4, "GW·노트북·진행자", ha="center", va="top", fontsize=8, color="#2557b8")
+    ax.add_patch(Rectangle((X(1300), YC0 + 0.2), X(1480) - X(1300), COR - 0.4, facecolor="none", edgecolor="#5d636b", ls=":", lw=1.2))
+    ax.text((X(1300) + X(1480)) / 2, YC0 + COR / 2, "대기 장소", ha="center", va="center", fontsize=9, color="#5d636b")
+    ax.text(X(838), YT1 + 0.4, "2026-11-03 실제 배치 · 복도 구역은 RX-COR~TX-1 구간 · 연기자 외에는 대기 장소", ha="left",
+            va="bottom", fontsize=9, color="#5d636b")
+
+
+fig, ax = plt.subplots(figsize=(24, 6.8), dpi=110)
+draw_layout_1103(ax)
+for t in list(ax.texts):  # 잘라 낸 범위 밖의 방 이름·축척 글자가 가장자리에 남지 않게
+    if "피난안내도" in t.get_text() or t.get_text() == "5 m":
+        t.remove()
+    else:
+        t.set_clip_on(True)
+ax.plot([X(440), X(440) + 5], [-3.2, -3.2], color=WALL, lw=3)
+ax.text(X(440) + 2.5, -3.5, "5 m", ha="center", va="top", fontsize=10, color=TXT)
+ax.text(X(1550), -3.5, "S4-1동 2층 · 223호 실측(7.35×5.80m)·복도 폭 실측(2.34m) 기준 축척", ha="right", va="top",
+        fontsize=9, color="#5d636b")
+ax.set_xlim(X(420), X(1560))
+ax.set_ylim(-4.6, YT1 + 1.4)
+ax.set_aspect("equal")
+ax.axis("off")
+fig.savefig(OUT / "s4-1_2f_layout_1103.png", bbox_inches="tight", facecolor="white")
+plt.close(fig)
+
 for name, annotate in (("s4-1_2f_plan.png", False), ("s4-1_2f_plan_annotated.png", True)):
     fig, ax = plt.subplots(figsize=(24, 7.2 if annotate else 6.4), dpi=110)
     draw(ax, annotate)
