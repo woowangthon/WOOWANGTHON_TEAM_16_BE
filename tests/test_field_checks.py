@@ -153,6 +153,6 @@ def test_check_flags_node_that_hears_part_of_tx():
     # 11/3 R06 RX-302: 무선 손실 0.2%였지만 송신 91Hz 중 52Hz만 받았다
     ok, lines = collector._verdict(_st_spread(rx=524, tx_span=910), 921600)
     assert not ok and any("보낸 것의 58%만" in x for x in lines)
-    # 11/3 R09 실제 배치: 송신 약 91Hz 중 83~93Hz
+    # 11/3 R09 실제 배치: 초당 83~93개 수신(같은 날 송신 약 91Hz)
     ok, lines = collector._verdict(_st_spread(rx=850, tx_span=910), 921600)
     assert ok and any("송신 대비 받은 비율 93%" in x for x in lines)

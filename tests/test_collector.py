@@ -112,7 +112,8 @@ def _s3_board(master: int, seed: int, stop: threading.Event, hz: float = 50.0, c
     i = 0
     while not stop.is_set():
         vals = [rnd.randint(-25, 25) for _ in range(384)]
-        line = _s3_line(i * 2, vals, rssi=-40 - (i % 5), ts=i * 20000)
+        # 송신 번호: 송신 보드가 보낸 10개 중 9개를 받는 셈(11/1 R02 USB 점검: 송신 81Hz 중 74Hz)
+        line = _s3_line(i + i // 9, vals, rssi=-40 - (i % 5), ts=i * 20000)
         if corrupt_every and i % corrupt_every == corrupt_every - 1:
             line = line[: len(line) // 2] + line[-3:]  # 가운데가 빠진 줄
         payload = (f"\x1b[0;32mI ({i}) csi_recv: compensate_gain 1.000000, agc_gain 30, fft_gain 2\x1b[0m\n{line}\n").encode()
@@ -129,7 +130,7 @@ def test_check_reports_good_and_silent_boards(capsys):
     pytest.importorskip("serial")
     stop = threading.Event()
     good, silent = os.openpty(), os.openpty()
-    th = threading.Thread(target=_s3_board, args=(good[0], 1, stop, 50.0, 20), daemon=True)
+    th = threading.Thread(target=_s3_board, args=(good[0], 1, stop, 90.0, 20), daemon=True)
     th.start()
     try:
         with pytest.raises(SystemExit) as exc:
@@ -142,7 +143,8 @@ def test_check_reports_good_and_silent_boards(capsys):
     assert "정상" in good_part and "값 개수 384(서브캐리어 192)" in good_part
     import re
     tx = int(re.search(r"송신 보드 약 (\d+) Hz", good_part).group(1))
-    assert 70 <= tx <= 130  # 가짜 보드는 패킷 번호를 2씩 올려 송신 100Hz·출력 50Hz를 흉내 낸다
+    assert 70 <= tx <= 130  # 가짜 보드는 초당 90줄을 내고 송신 번호를 10개 중 1개씩 건너뛴다(송신 약 100Hz)
+    assert "송신 대비 받은 비율" in good_part and "보낸 것의" not in good_part
     assert "잘린 줄" in good_part and "채널 11" in good_part
     assert "아무 출력이 없습니다" in silent_part
 
