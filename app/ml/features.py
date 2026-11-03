@@ -37,6 +37,14 @@ FEATURE_LABELS_KO: dict[str, str] = {
 
 N_FEATURES = len(FEATURE_NAMES)
 MIN_FRAMES_PER_WINDOW = 3
+# 창에 들어온 프레임이 그날 빈 방 때 초당 프레임으로 기대한 수의 이 비율보다 적으면 그 창은 쓰지 않는다.
+# 프레임이 빠지면 pc1_ratio·diff_mean 등이 사람 없이도 커진다(모의실험: 90Hz 기준선에 25Hz 빈 방 → 1단계 0.91).
+MIN_WINDOW_QUALITY = 0.7
+
+
+def window_quality(n_frames: int, fps: float, window_s: float) -> float:
+    """창에 들어온 프레임 수 ÷ 기준선 초당 프레임으로 기대한 수(최대 1)."""
+    return min(1.0, n_frames / max(1e-6, window_s * fps))
 
 
 def breath_band_ratio(rel_ctx: np.ndarray, t_ctx: np.ndarray) -> float:

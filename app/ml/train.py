@@ -30,7 +30,7 @@ from sklearn.linear_model import LogisticRegression
 
 from ..config import settings
 from .baseline import Baseline, BaselineError, fit_baseline
-from .features import FEATURE_NAMES, context_slice, iter_windows
+from .features import FEATURE_NAMES, MIN_WINDOW_QUALITY, context_slice, iter_windows, window_quality
 from .model import PresenceModel
 from .sessions import LABEL_KO, PERSON_LABELS, Session, load_sessions
 
@@ -46,6 +46,23 @@ class WindowSet:
     label: list[str]
     session: list[str]
     t_rel: np.ndarray    # 세션 시작부터 초
+
+
+@dataclass
+class WindowCount:
+    """창 수와, 프레임이 모자라(그날 빈 방의 MIN_WINDOW_QUALITY 미만) 뺀 창 수."""
+    total: int = 0
+    short: int = 0
+    quality_sum: float = 0.0
+
+    def add(self, other: WindowCount) -> None:
+        self.total += other.total
+        self.short += other.short
+        self.quality_sum += other.quality_sum
+
+    @property
+    def quality_mean(self) -> float:
+        return self.quality_sum / self.total if self.total else math.nan
 
 
 def _empty_split(sessions: list[Session]) -> tuple[Session | None, list[tuple[Session, float]]]:
@@ -72,13 +89,26 @@ def _fit_day_baseline(base_session: Session, use_until: float | None) -> Baselin
     return fit_baseline(t, rssi, amp, settings.window_seconds, settings.context_seconds)
 
 
-def _windows(session: Session, base: Baseline, start_after: float | None = None) -> WindowSet | None:
+def _windows(session: Session, base: Baseline,
+             start_after: float | None = None) -> tuple[WindowSet | None, WindowCount]:
+    """세션을 2초 창으로 자른다. 프레임이 모자란 창은 빼고 그 수를 함께 돌려준다.
+
+    무선 손실로 프레임이 빠지면 특징이 사람 없이도 커진다. 사람 장면일수록 프레임이 덜 들어오면
+    모델이 신호 대신 '덜 들어옴'을 배우므로, 그런 창은 학습·평가에서 빼고 모델 카드에 수를 남긴다.
+    """
+    count = WindowCount()
     if session.amp.shape[1] != base.n_subcarriers:
-        return None
+        return None, count
     zs, pcs, trel = [], [], []
     w, c = settings.window_seconds, settings.context_seconds
     for i0, i1, t_end in iter_windows(session.t, w):
         if start_after is not None and t_end - w < start_after:
+            continue
+        q = window_quality(i1 - i0, base.fps, w)
+        count.total += 1
+        count.quality_sum += q
+        if q < MIN_WINDOW_QUALITY:
+            count.short += 1
             continue
         c0, c1 = context_slice(session.t, t_end, c)
         f = base.features(session.amp[i0:i1], session.rssi[i0:i1], session.amp[c0:c1], session.t[c0:c1])
@@ -89,10 +119,10 @@ def _windows(session: Session, base: Baseline, start_after: float | None = None)
         pcs.append(base.p_change(base.change_score(z)))
         trel.append(t_end - session.start)
     if not zs:
-        return None
+        return None, count
     n = len(zs)
     return WindowSet(np.vstack(zs), np.full(n, 1 if session.is_person else 0), np.array(pcs),
-                     [session.label] * n, [session.session_id] * n, np.array(trel))
+                     [session.label] * n, [session.session_id] * n, np.array(trel)), count
 
 
 def _concat(sets: list[WindowSet]) -> WindowSet:
@@ -106,8 +136,10 @@ def _concat(sets: list[WindowSet]) -> WindowSet:
     )
 
 
-def build_day_windows(sessions: list[Session], baseline_from: dict | None = None) -> tuple[dict, list[str], dict]:
-    """날짜별 WindowSet. baseline_from={(node, day): Baseline}을 주면 그 기준선을 쓴다(재보정 없음 실험)."""
+def build_day_windows(sessions: list[Session], baseline_from: dict | None = None,
+                      counts: dict[str, WindowCount] | None = None) -> tuple[dict, list[str], dict]:
+    """날짜별 WindowSet. baseline_from={(node, day): Baseline}을 주면 그 기준선을 쓴다(재보정 없음 실험).
+    counts를 주면 라벨별 창 수와 프레임이 모자라 뺀 창 수를 채운다."""
     notes: list[str] = []
     by_key: dict[tuple[str, str], list[Session]] = defaultdict(list)
     for s in sessions:
@@ -133,10 +165,19 @@ def build_day_windows(sessions: list[Session], baseline_from: dict | None = None
             if s is base_session and use_until is None:
                 continue  # 기준선 전체로 쓴 세션은 평가에 넣지 않는다
             start_after = use_until if s is base_session else None
-            ws = _windows(s, base, start_after)
+            ws, cnt = _windows(s, base, start_after)
+            if counts is not None:
+                counts.setdefault(s.label, WindowCount()).add(cnt)
             if ws is None:
-                notes.append(f"{s.session_id}: 서브캐리어 수가 기준선과 달라 제외")
+                if s.amp.shape[1] != base.n_subcarriers:
+                    notes.append(f"{s.session_id}: 서브캐리어 수가 기준선과 달라 제외")
+                elif cnt.total:
+                    notes.append(f"{s.session_id}: 모든 창의 프레임이 그날 빈 방의 {MIN_WINDOW_QUALITY:.0%}보다 적어 제외")
+                else:
+                    notes.append(f"{s.session_id}: 2초 창을 만들 만큼 길지 않아 제외")
                 continue
+            if cnt.short and counts is not None:
+                notes.append(f"{s.session_id}: 프레임이 모자란 창 {cnt.short}/{cnt.total}개를 뺐습니다")
             per_day[day].append(ws)
     return {d: _concat(v) for d, v in per_day.items() if v}, notes, baselines
 
@@ -212,7 +253,8 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
     sessions, problems = load_sessions(data_dir)
     if not sessions:
         raise SystemExit("세션을 찾지 못했습니다. --data 경로와 파일 형식을 확인하세요.\n" + "\n".join(problems))
-    per_day, notes, baselines = build_day_windows(sessions)
+    counts: dict[str, WindowCount] = {}
+    per_day, notes, baselines = build_day_windows(sessions, counts=counts)
     notes = problems + notes
     days = sorted(per_day)
     if not days:
@@ -308,6 +350,14 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
             "windows": int(full.y.size),
             "windows_by_label": dict(label_counts),
             "person_labels": sorted(PERSON_LABELS),
+            # 사람 장면에서만 프레임이 덜 들어왔다면 결과가 낙관적일 수 있다. 라벨마다 비교해 본다
+            "frame_check": {
+                "min_frames_vs_empty": MIN_WINDOW_QUALITY,
+                "by_label": {
+                    lab: {"windows": c.total, "excluded_short": c.short, "mean_frames_vs_empty": c.quality_mean}
+                    for lab, c in sorted(counts.items())
+                },
+            },
         },
         "validation": {"method": method, "folds": folds, "summary": summary},
         "notes": notes,

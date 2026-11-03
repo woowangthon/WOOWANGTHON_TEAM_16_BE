@@ -168,3 +168,31 @@ def test_plan_upload_validates_type(client, auth):
     bad = client.put(f"/api/buildings/{bid}/plan", files={"file": ("p.txt", b"hello", "text/plain")},
                      data={"width": "800", "height": "600"}, headers=auth)
     assert bad.status_code == 415
+
+
+def test_low_frame_rate_is_not_read_as_person(client, auth):
+    """무선 손실로 프레임이 1/3만 오면 빈 방도 특징이 커진다. 감지로 띄우지 말고 '신호 부족'으로 보여야 한다."""
+    room = SyntheticRoom(seed=31)
+    b = client.post("/api/buildings", json={"name": "수신율 확인"}, headers=auth).json()
+    z = client.post(f"/api/buildings/{b['id']}/zones", json={"name": "A", "polygon": [[0, 0], [1, 0], [1, 1]]}, headers=auth).json()
+    rx = client.post(f"/api/buildings/{b['id']}/nodes", json={"name": "RX", "role": "rx", "x": 0.5, "y": 0.5, "zone_id": z["id"]}, headers=auth).json()
+    client.post(f"/api/buildings/{b['id']}/calibration/start", json={"duration_seconds": 120}, headers=auth)
+    _send(client, rx["token"], room.frames(40, "empty", seed=32))
+    client.post(f"/api/buildings/{b['id']}/calibration/stop", headers=auth)
+    incident_id = client.post("/api/alarm", json={"event": "fire"}, headers={"X-Alarm-Token": b["alarm_token"]}).json()["incident_id"]
+
+    _send(client, rx["token"], room.frames(24, "empty", fps=15, seed=33, t0=1_700_030_000.0))  # 보정 때의 30%
+    with SessionLocal() as db:
+        rows = db.query(Inference).filter(Inference.incident_id == incident_id).all()
+    assert rows and all(r.quality < 0.7 for r in rows)
+    state = client.get(f"/api/incidents/{incident_id}/state", headers=auth).json()
+    node = next(n for n in state["nodes"] if n["role"] == "rx")
+    assert node["status"] == "stale" and node["reason"] == "low_rate"
+    assert state["zones"][0]["state"] == "no_signal"
+    assert not any(e["kind"] == "first_detection" for e in state["timeline"])
+
+    # 다시 제대로 들어오면 판단을 이어 간다
+    _send(client, rx["token"], room.frames(24, "empty", seed=34, t0=1_700_030_030.0))
+    state = client.get(f"/api/incidents/{incident_id}/state", headers=auth).json()
+    assert state["zones"][0]["state"] == "not_detected"
+    client.post(f"/api/incidents/{incident_id}/close", headers=auth)

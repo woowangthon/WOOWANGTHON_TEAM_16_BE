@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .baseline import Baseline, BaselineError
-from .features import FEATURE_LABELS_KO, FEATURE_NAMES
+from .features import FEATURE_LABELS_KO, FEATURE_NAMES, MIN_WINDOW_QUALITY
 from .sessions import LABEL_KO, PERSON_LABELS, Session, load_sessions
 from .train import _empty_split, _fit_day_baseline, _windows
 
@@ -34,6 +34,7 @@ EMPTY_MAX = 0.20       # 빈 방인데 변화 큰 창이 이보다 많으면 기
 WALK_MIN = 0.50        # 걷기인데 변화 큰 창이 이보다 적으면 보드 자리를 의심
 PERSON_MIN = 0.50      # 그 밖의 사람 장면이 이보다 적으면 1단계만으로는 약함
 NONHUMAN_MAX = 0.30    # 옆 구역·선풍기·문·열기류가 이보다 많으면 오경보 후보
+SHORT_MAX = 0.20       # 프레임이 모자라 뺀 창이 이보다 많으면 무선·USB 연결을 의심
 
 
 @dataclass
@@ -48,6 +49,8 @@ class Row:
     big_ratio: float = float("nan")
     top_feature: str = ""
     top_z: float = float("nan")
+    frames_vs_empty: float = float("nan")  # 창마다 프레임 수 ÷ 그날 빈 방 기준의 평균
+    short: int = 0                         # 프레임이 모자라 뺀 창
     status: str = ""      # 기준선 / 정상 / 확인 / 참고 / 제외
     message: str = ""
 
@@ -95,9 +98,17 @@ def _row(s: Session, base: Baseline | None, start_after: float | None) -> Row:
     row = Row(_scene(s), s.label, seconds, hz)
     if base is None:
         return row
-    ws = _windows(s, base, start_after)
+    ws, cnt = _windows(s, base, start_after)
+    row.frames_vs_empty, row.short = cnt.quality_mean, cnt.short
     if ws is None:
-        row.status, row.message = "제외", "서브캐리어 수가 기준선과 다릅니다(그날 펌웨어 설정이 바뀌었는지 확인)"
+        if cnt.total:
+            row.status, row.message = "확인", (
+                f"프레임이 그날 빈 방의 {cnt.quality_mean:.0%}만 들어왔습니다(기준 {MIN_WINDOW_QUALITY:.0%}). "
+                "이 장면은 학습에서 빠집니다. 게이트웨이 자리나 USB 연결을 확인하고 다시 찍으세요")
+        elif s.amp.shape[1] != base.n_subcarriers:
+            row.status, row.message = "제외", "서브캐리어 수가 기준선과 다릅니다(그날 펌웨어 설정이 바뀌었는지 확인)"
+        else:
+            row.status, row.message = "제외", "2초 창을 만들 만큼 길지 않습니다"
         return row
     scores = np.array([base.change_score(z) for z in ws.z])
     row.windows = int(scores.size)
@@ -108,6 +119,10 @@ def _row(s: Session, base: Baseline | None, start_after: float | None) -> Row:
     k = int(np.argmax(zmed))
     row.top_feature, row.top_z = FEATURE_NAMES[k], float(zmed[k])
     row.status, row.message = _judge(s.label, row.big_ratio)
+    if cnt.short > SHORT_MAX * cnt.total:
+        row.status = "확인"
+        row.message += (f". 또 프레임이 모자란 창이 {cnt.short}/{cnt.total}개입니다(그날 빈 방 대비 평균 "
+                        f"{cnt.quality_mean:.0%}). 이 창들은 학습에서 빠지니 게이트웨이 자리나 USB 연결을 확인하세요")
     return row
 
 
@@ -163,14 +178,16 @@ def format_report(groups: list[Group]) -> str:
         out.append(head)
         if g.note:
             out.append(f"  {g.note}")
-        out.append(f"  {'장면':<16}{'라벨':<12}{'초':>5}{'초당':>6}{'창':>5}{'변화점수':>9}{'변화 큰 창':>11}  {'판단':<6}주로 변한 것")
+        out.append(f"  {'장면':<16}{'라벨':<12}{'초':>5}{'초당':>6}{'수신율':>7}{'창':>5}{'변화점수':>9}{'변화 큰 창':>11}"
+                   f"  {'판단':<6}주로 변한 것")
         for r in g.rows:
             label = LABEL_KO.get(r.label, r.label)
             # 빈 방처럼 거의 안 변한 장면은 '주로 변한 것'을 비워 둔다(2σ 미만은 잡음 수준)
             feat = (f"{FEATURE_LABELS_KO.get(r.top_feature, r.top_feature)} {r.top_z:+.1f}σ"
                     if r.top_feature and r.top_z >= 2.0 else "-")
             ratio = "-" if not np.isfinite(r.big_ratio) else f"{r.big_ratio:.0%}"
-            out.append(f"  {r.scene:<16}{label:<12}{r.seconds:>5.0f}{r.hz:>6.0f}{r.windows:>5}"
+            rate = "-" if not np.isfinite(r.frames_vs_empty) else f"{r.frames_vs_empty:.0%}"
+            out.append(f"  {r.scene:<16}{label:<12}{r.seconds:>5.0f}{r.hz:>6.0f}{rate:>7}{r.windows:>5}"
                        f"{_fmt(r.score_med, '.1f'):>9}{ratio:>11}  {r.status:<6}{feat}")
             if r.status in {"확인", "제외"}:
                 flagged.append(f"{g.node} {g.day} {r.scene}: {r.message}")
@@ -183,6 +200,8 @@ def format_report(groups: list[Group]) -> str:
     out.append("")
     out.append("읽는 법: '변화 큰 창'은 2초 창 중 그날 빈 방의 99백분위(τ)를 넘은 비율입니다. "
                "빈 방은 낮고 걷기는 높아야 합니다.")
+    out.append(f"'수신율'은 창마다 들어온 프레임 수를 그날 빈 방 기준과 비교한 평균입니다. "
+               f"{MIN_WINDOW_QUALITY:.0%}보다 적은 창은 학습에서 빠집니다. 사람 장면에서만 낮으면 게이트웨이 자리를 옮기세요.")
     return "\n".join(out)
 
 

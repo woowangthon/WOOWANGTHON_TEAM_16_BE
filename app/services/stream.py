@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..ml.baseline import Baseline, BaselineError, fit_baseline
 from ..ml.csi import Frame, frames_to_arrays
-from ..ml.features import FEATURE_NAMES, context_slice
+from ..ml.features import FEATURE_NAMES, MIN_WINDOW_QUALITY, context_slice, window_quality
 from ..models import Baseline as BaselineRow
 from ..models import CalibrationRun, Event, Incident, Inference, Node, Zone, utcnow
 from .registry import registry
@@ -190,7 +190,7 @@ class StreamHub:
             score = base.change_score(z)
             p_change = base.p_change(score)
             p_person = model.predict(z) if model is not None else None
-            quality = min(1.0, (i1 - i0) / max(1e-6, w * base.fps))
+            quality = window_quality(i1 - i0, base.fps, w)
             db.add(Inference(
                 incident_id=incident.id,
                 node_id=node.id,
@@ -204,6 +204,8 @@ class StreamHub:
                 source=source,
             ))
             made += 1
+            if quality < MIN_WINDOW_QUALITY:
+                continue  # 프레임이 모자란 창은 저장만 하고 판단(첫 감지 알림, 구역 상태)에 쓰지 않는다
             p_used = p_person if p_person is not None else p_change
             if p_used >= DETECT_P and node.zone_id is not None:
                 self._note_first_detection(db, incident, node, p_used, model is not None)
