@@ -4,6 +4,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
@@ -137,5 +138,21 @@ def _st(tx_span: int, seconds: float = 10.0, csi: int = 160) -> dict:
 def test_tx_power_warning():
     ok, lines = collector._verdict(_st(tx_span=230), 921600)  # 11/1 보조배터리: 송신 약 23Hz
     assert not ok and any("보조배터리" in x for x in lines)
-    ok, lines = collector._verdict(_st(tx_span=800), 921600)  # 노트북 USB 전원: 약 80Hz
+    ok, lines = collector._verdict(_st(tx_span=800, csi=740), 921600)  # 노트북 USB 전원: 약 74~80Hz
     assert ok and not any("보조배터리" in x for x in lines)
+
+
+def _st_spread(rx: int, tx_span: int, seconds: float = 10.0) -> dict:
+    """송신 번호 0..tx_span-1 중 rx개만 받은 점검 결과(번호가 고르게 빠짐)."""
+    st = _st(tx_span=tx_span, seconds=seconds, csi=rx)
+    st["seq"] = [int(x) for x in np.linspace(0, tx_span - 1, rx)]
+    return st
+
+
+def test_check_flags_node_that_hears_part_of_tx():
+    # 11/3 R06 RX-302: 무선 손실 0.2%였지만 송신 91Hz 중 52Hz만 받았다
+    ok, lines = collector._verdict(_st_spread(rx=524, tx_span=910), 921600)
+    assert not ok and any("보낸 것의 58%만" in x for x in lines)
+    # 11/3 R09 실제 배치: 송신 약 91Hz 중 83~93Hz
+    ok, lines = collector._verdict(_st_spread(rx=850, tx_span=910), 921600)
+    assert ok and any("송신 대비 받은 비율 93%" in x for x in lines)

@@ -71,6 +71,9 @@ DEFAULT_BAUD = 921600  # csi_recv 예제의 sdkconfig.defaults(CONFIG_ESP_CONSOL
 SEND_MAC = "1a:00:00:00:00:00"  # csi_send 예제가 쓰는 송신 MAC. csi_recv는 이 MAC의 패킷만 출력한다
 MIN_HZ = 10.0
 TX_MIN_HZ = 50.0  # TX-1은 초당 100개를 보낸다. 11/1 보조배터리로 켰을 때 약 23개로 떨어졌다
+# 받은 수 ÷ 송신 수. 무선 손실 숫자는 노드가 보내기 직전부터만 세서, 노드 안에서 빠진 것은 여기서만 보인다.
+# 11/3 R06 RX-302는 손실 0.2%였지만 송신 91Hz 중 52Hz만 받았다. 프레임이 줄면 특징이 커져 빈 방도 감지로 바뀐다
+RX_TX_MIN_RATIO = 0.7
 NODES_FILE = Path(__file__).resolve().parent.parent / "nodes.csv"
 
 
@@ -206,6 +209,7 @@ class _NodeStats:
     def __init__(self) -> None:
         self.frames = 0
         self.lost = 0
+        self.resets = 0  # 노드가 다시 켜진 횟수(번호가 크게 뜀). 이득 보정 기준도 다시 잡힌다
         self.last_seq: int | None = None
         self.gw_rssi: list[int] = []
         self.lengths: Counter = Counter()
@@ -218,6 +222,8 @@ class _NodeStats:
             gap = (seq - self.last_seq - 1) % 65536
             if 0 < gap < GW_SEQ_RESET:
                 self.lost += gap
+            elif gap >= GW_SEQ_RESET:
+                self.resets += 1
         self.last_seq = seq
         self.frames += 1
         self.gw_rssi.append(d["gw_rssi"])
@@ -294,7 +300,7 @@ class _GatewayHub:
                 if targets:
                     line = (gw_csi_line(d) + "\n").encode()
                     for t in targets:
-                        t.q.put(line)
+                        t.offer(line)
 
     def subscribe(self, port: "_GatewayNodePort") -> None:
         with self._sub_lock:
@@ -314,7 +320,34 @@ class _GatewayNodePort:
         self.hub, self.mac = hub, mac
         self.q: "queue_mod.Queue[bytes]" = queue_mod.Queue(maxsize=5000)
         self.closed = False
+        self.dropped = 0
+        self._resets_at_open = self._resets()
         hub.subscribe(self)
+
+    def offer(self, line: bytes) -> None:
+        """허브 스레드가 부른다. 기다리지 않는다: 큐가 차면 가장 오래된 줄을 버리고 넣는다.
+
+        session이 장면 사이에 Enter를 기다리는 동안 아무도 큐를 읽지 않는다. 여기서 허브가 기다리면
+        게이트웨이 포트 읽기가 통째로 멈추고, 다음 장면 앞에 오래된 프레임이 지금 시각으로 섞인다.
+        """
+        while True:
+            try:
+                self.q.put_nowait(line)
+                return
+            except queue_mod.Full:
+                try:
+                    self.q.get_nowait()
+                    self.dropped += 1
+                except queue_mod.Empty:
+                    pass
+
+    def _resets(self) -> int:
+        st = self.hub.stats.get(self.mac)
+        return st.resets if st else 0
+
+    def restarts_since_open(self) -> int:
+        """이 포트를 연 뒤 노드가 다시 켜진 횟수."""
+        return self._resets() - self._resets_at_open
 
     def readline(self) -> bytes:
         try:
@@ -545,6 +578,14 @@ def _verdict(st: dict, baud: int) -> tuple[bool, list[str]]:
             ok = False
             out.append(f"  경고: 송신 보드(TX-1)가 초당 약 {tx_hz:.0f}개만 보내고 있습니다(정상 약 100). "
                        "TX-1을 보조배터리로 켰다면 충전기나 노트북 USB로 바꾸고 다시 점검하세요.")
+        else:
+            ratio = hz / tx_hz
+            out.append(f"송신 대비 받은 비율 {ratio:.0%}")
+            if ratio < RX_TX_MIN_RATIO:
+                ok = False
+                out.append(f"  경고: 송신 보드가 보낸 것의 {ratio:.0%}만 받고 있습니다(기준 {RX_TX_MIN_RATIO:.0%}). "
+                           "무선 손실 숫자에는 안 잡히는 누락입니다. 게이트웨이를 노드 쪽으로 옮기거나 "
+                           "그 노드만 USB 케이블로 꽂아 다시 점검하세요.")
     if hz < MIN_HZ:
         ok = False
         out.append(f"  경고: 초당 {MIN_HZ:.0f}줄보다 적습니다. 송신 보드 전원과 거리, USB 허브를 확인하세요.")
@@ -660,6 +701,7 @@ def _record_scene(sers: dict, labels: dict[str, str], seconds: float, countdown:
     deadline = started + seconds
     counts = {n: 0 for n in nodes}
     saved: dict[str, tuple[Path, int, float]] = {}
+    restarts: dict[str, int] = {}
     stop = threading.Event()
     sids = {n: f"{day}_{n}_{labels[n]}_{stamp}" for n in nodes}
 
@@ -675,8 +717,11 @@ def _record_scene(sers: dict, labels: dict[str, str], seconds: float, countdown:
                 _write_frame(w, t, rssi, raw)
                 counts[node] += 1
         took = round(time.time() - started, 1)
+        if hasattr(ser, "restarts_since_open"):
+            restarts[node] = ser.restarts_since_open()
         meta = {"session_id": sid, "node": node, "label": labels[node], "day": day, "started_at": started,
-                "frames": counts[node], "seconds": took, "recorded_with": nodes, **meta_extra}
+                "frames": counts[node], "seconds": took, "recorded_with": nodes,
+                "node_restarts": restarts.get(node, 0), **meta_extra}
         (out / f"{sid}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         saved[node] = (csv_path, counts[node], took)
 
@@ -705,6 +750,9 @@ def _record_scene(sers: dict, labels: dict[str, str], seconds: float, countdown:
         print(f"저장: {path.name} ({n}프레임, {n / max(took, 1e-6):.0f}Hz)")
         if n < seconds * MIN_HZ:
             print(f"  경고: {node}의 초당 프레임이 {MIN_HZ:.0f}개보다 적습니다. 송신 보드·거리·USB 연결을 확인하세요.")
+        if restarts.get(node):
+            print(f"  경고: {node}가 이 수집을 시작한 뒤 다시 켜졌습니다(전원이 잠깐 빠졌을 수 있음). "
+                  "보드가 신호 크기 기준을 다시 잡으므로, 명령을 다시 시작해 그날 start_empty부터 다시 찍으세요.")
     return saved
 
 

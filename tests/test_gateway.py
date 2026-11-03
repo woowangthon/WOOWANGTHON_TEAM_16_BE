@@ -100,7 +100,8 @@ class FakeGateway:
                 if k and seq % k == k - 1:
                     continue  # 무선에서 잃은 패킷: 번호만 건너뛴다
                 data = [self.rnd.randint(-30, 30) for _ in range(self.length)]
-                out += csi_frame(mac, node_packet(seq, seq * 2, data, rssi=-40 - seq % 4))
+                # 송신 번호도 노드 번호와 같이 하나씩 오른다(실제처럼 송신 보드가 보낸 것마다 하나씩 받음)
+                out += csi_frame(mac, node_packet(seq, seq, data, rssi=-40 - seq % 4))
         if now - self.last_status > 0.5:
             self.last_status = now
             out += collector.gw_frame(collector.GW_TYPE_STATUS, b"gateway 90:70:69:00:00:99 up 5s csi 10 usb_drop 0")
@@ -242,3 +243,47 @@ def test_nodelog_shows_only_node_status(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "csi_node:" in out and "CSI 88.0 Hz" in out and "skip 10" in out  # 끝의 0이 잘리지 않음
     assert "CSI_DATA" not in out and "wifi:mode" not in out
+
+
+# ---------------------------------------------------------------- 장면 사이 대기와 노드 재시작
+
+class _QuietHub:
+    """허브 스레드 없이 _GatewayNodePort만 시험한다."""
+
+    def __init__(self):
+        self.stats = {}
+
+    def subscribe(self, port):
+        pass
+
+    def unsubscribe(self, port):
+        pass
+
+    def release(self):
+        pass
+
+
+def test_node_port_drops_oldest_instead_of_blocking_hub():
+    # session이 Enter를 기다리는 동안 아무도 큐를 읽지 않는다. 허브가 여기서 기다리면 게이트웨이 읽기가 멈춘다
+    port = collector._GatewayNodePort(_QuietHub(), MAC_A)
+    n = port.q.maxsize + 3
+    started = time.time()
+    for i in range(n):
+        port.offer(f"{i}\n".encode())
+    assert time.time() - started < 1.0
+    assert port.q.qsize() == port.q.maxsize and port.dropped == 3
+    assert port.readline() == b"3\n"  # 가장 오래된 0~2가 버려졌다
+    port.reset_input_buffer()
+    port.offer(b"fresh\n")
+    assert port.readline() == b"fresh\n"  # 녹화 시작 뒤에는 새 줄만 나온다
+
+
+def test_node_restart_is_counted_not_lost():
+    hub = _QuietHub()
+    port = collector._GatewayNodePort(hub, MAC_A)
+    st = hub.stats[MAC_A] = collector._NodeStats()
+    for seq in (500, 501, 503):
+        st.add({"node_seq": seq, "gw_rssi": -50, "values": [0] * 4})
+    assert st.lost == 1 and st.resets == 0 and port.restarts_since_open() == 0
+    st.add({"node_seq": 0, "gw_rssi": -50, "values": [0] * 4})  # 전원이 빠졌다 들어와 번호가 0부터
+    assert st.lost == 1 and st.resets == 1 and port.restarts_since_open() == 1
