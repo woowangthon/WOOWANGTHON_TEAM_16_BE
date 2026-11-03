@@ -219,3 +219,26 @@ def test_live_sends_each_gateway_node_with_its_token(fake_gateway, monkeypatch):
     collector.main(["live", "--gateway", "FAKEGW", "--api", "http://x",
                     "--port", f"gw:{MAC_A}", "--token", "tok-a", "--port", f"gw:{MAC_B}", "--token", "tok-b"])
     assert posted.get("tok-a", 0) > 30 and posted.get("tok-b", 0) > 30
+
+
+def test_nodelog_shows_only_node_status(monkeypatch, capsys):
+    lines = [b"\x1b[0;32mI (5321) csi_node: \xeb\x85\xb8\xeb\x93\x9c 90:70:69:f7:ec:bc | CSI 88.0 Hz | skip 10\x1b[0m\n",
+             b'CSI_DATA,1,1a:00:00:00:00:00,-40,0,1,0,1,0,0,0,0,0,0,-95,0,11,2,10,0,0,1,2,0,"[1,2]"\n',
+             b"I (300) wifi:mode : sta\n"]
+
+    class FakeNode:
+        def __init__(self):
+            self.i = 0
+
+        def readline(self):
+            self.i += 1
+            return lines[(self.i - 1) % len(lines)]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(collector, "_serial_factory", lambda port, baud, timeout: FakeNode())
+    collector.main(["nodelog", "--port", "COM5", "--seconds", "0.2"])
+    out = capsys.readouterr().out
+    assert "csi_node:" in out and "CSI 88.0 Hz" in out and "skip 10" in out  # 끝의 0이 잘리지 않음
+    assert "CSI_DATA" not in out and "wifi:mode" not in out

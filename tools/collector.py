@@ -1037,6 +1037,35 @@ def cmd_send(args) -> None:
     print("\n전송 끝")
 
 
+def cmd_nodelog(args) -> None:
+    """USB로 꽂은 노드(csi_node)의 상태 줄만 보여 준다. CSI_DATA 줄은 숨긴다.
+
+    5초마다 'CSI ○Hz, 전송 ○Hz, USB ○Hz | ACK 없음, 큐 버림, 전송 버림, USB 건너뜀'이 나온다.
+    ACK 없음이 늘면 무선 구간(거리·벽·간섭) 문제, 큐 버림·전송 버림이 늘면 보드 안에서 못 따라가는 것이다.
+    """
+    if args.port.lower().startswith("gw:"):
+        sys.exit("nodelog는 노드를 USB로 꽂은 포트(COM 번호)에 씁니다.")
+    ser = _open_serial(args.port, args.baud)
+    print(f"{args.port}의 노드 상태를 {args.seconds:.0f}초 동안 봅니다(5초마다 한 줄).")
+    deadline = time.time() + args.seconds
+    shown = 0
+    try:
+        while time.time() < deadline:
+            b = ser.readline()
+            if not b:
+                continue
+            line = b.decode("utf-8", errors="replace").strip()
+            if "CSI_DATA" in line or "csi_node" not in line:
+                continue
+            k = line.find("csi_node")
+            print(line[k:].replace("\x1b[0m", "").strip())  # 줄 끝 색 코드만 지운다
+            shown += 1
+    finally:
+        ser.close()
+    if not shown:
+        print("상태 줄이 없습니다. 이 포트가 csi_node를 올린 노드인지, 속도가 921600인지 확인하세요.")
+
+
 def cmd_compare(args) -> None:
     # 비교표는 서버 설정 중 창 길이만 쓴다. 서버용 SECRET_KEY 안내가 섞여 나오지 않게 비어 있으면 채워 둔다.
     os.environ.setdefault("SECRET_KEY", "collector-compare-local")
@@ -1100,6 +1129,11 @@ def main(argv: list[str] | None = None) -> None:
     lv.add_argument("--token", action="append", default=[], help="노드 토큰. --port와 같은 순서")
     lv.add_argument("--save-dir", default="")
 
+    nl = sub.add_parser("nodelog", help="USB로 꽂은 무선 노드의 상태 줄(전송·손실 원인) 보기")
+    nl.add_argument("--port", required=True)
+    nl.add_argument("--seconds", type=float, default=15)
+    nl.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+
     cp = sub.add_parser("compare", help="비교표: 녹화 장면마다 그날 빈 방 대비 변화(보드 자리·기준선 점검)")
     cp.add_argument("--data", required=True, help="세션 폴더(예: ../data/sessions/2026-11-04)")
     cp.add_argument("--node", action="append", default=[], help="이 노드만(여러 번 가능)")
@@ -1118,7 +1152,8 @@ def main(argv: list[str] | None = None) -> None:
         _NODES["path"] = Path(args.nodes)
     try:
         {"ports": cmd_ports, "check": cmd_check, "session": cmd_session, "record": cmd_record,
-         "live": cmd_live, "send": cmd_send, "gateway": cmd_gateway, "compare": cmd_compare}[args.cmd](args)
+         "live": cmd_live, "send": cmd_send, "gateway": cmd_gateway, "compare": cmd_compare,
+         "nodelog": cmd_nodelog}[args.cmd](args)
     finally:
         _close_all_gateways()
         _GATEWAY.update(saved[0])

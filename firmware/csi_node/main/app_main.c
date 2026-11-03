@@ -6,8 +6,9 @@
  * 결과를 내보내는 길만 바꿨다.
  *
  *   게이트웨이가 보이면 → CSI 한 건마다 ESP-NOW로 게이트웨이에 보낸다.
- *   그리고 기본 설정(WM_UART_ALWAYS)에서는 늘 원본 csi_recv와 똑같은 CSI_DATA 줄을 UART(USB)로도 찍는다.
- *   그래서 무선이 안 되는 날에는 USB 케이블만 꽂으면 기존 수집 도구가 그대로 동작한다.
+ *   그리고 기본 설정(WM_UART_ALWAYS)에서는 원본 csi_recv와 같은 CSI_DATA 줄을 UART(USB)로도 찍는다.
+ *   USB 출력은 무선보다 우선순위가 낮은 별도 태스크가 하므로 무선 전송을 막지 않는다.
+ *   무선이 안 되는 날에는 USB 케이블만 꽂으면 기존 수집 도구가 그대로 동작한다.
  *
  * 원본과 달라진 점:
  *   - 수신 보드의 MAC을 송신 MAC(1a:00:...)으로 바꾸지 않는다. 노드마다 공장 MAC을 써야
@@ -75,6 +76,9 @@ typedef struct {
 } csi_item_t;
 
 static QueueHandle_t s_csi_queue;
+static QueueHandle_t s_print_queue;
+static volatile uint32_t s_print_drop = 0;    /* USB가 못 따라가 건너뛴 줄 */
+static volatile uint32_t s_printed = 0;       /* USB로 찍은 줄 */
 
 static bool gateway_alive(void)
 {
@@ -174,30 +178,34 @@ static void add_gateway_peer(const uint8_t mac[6])
 }
 
 /* ------------------------------------------------------------------ CSI 콜백(원본과 같은 측정·보정) */
+/*
+ * 콜백은 와이파이 태스크 안에서 돈다. 여기서 USB로 글자를 찍으면(921600bps에서 한 줄 약 16ms)
+ * 그동안 와이파이 처리가 멈춰 ESP-NOW 전송 대기열이 넘친다(11/3 점검에서 무선 손실 20%의 원인).
+ * 그래서 콜백은 측정값을 한 번 복사해 큐에 넣기만 하고, 무선 전송(uplink_task)과
+ * USB 출력(print_task)은 다른 코어의 태스크가 한다. USB 출력은 무선보다 우선순위가 낮다.
+ */
 
-static void queue_for_gateway(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain);
-
-static void print_csi_line_like_csi_recv(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain,
-                                         uint8_t agc_gain, int8_t fft_gain, bool first)
+static void fill_item(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain, csi_item_t *item)
 {
-    /* 게이트웨이가 없을 때: 원본 csi_recv(ESP32-S3)와 똑같은 형식으로 UART에 찍는다 */
     const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
-    if (first) {
-        ESP_LOGI(TAG, "================ CSI RECV ================");
-        ets_printf("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_format,len,first_word,data\n");
-    }
-    ESP_LOGI(TAG, "compensate_gain %f, agc_gain %d, fft_gain %d", compensate_gain, agc_gain, fft_gain);
-    ets_printf("CSI_DATA,%" PRIu32 "," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-               rx_id, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
-               rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
-               rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
-               rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
-               rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->sig_mode);
-    ets_printf(",%d,%d,\"[%d", info->len, info->first_word_invalid, (int16_t)(compensate_gain * info->buf[0]));
-    for (int i = 1; i < info->len; i++) {
-        ets_printf(",%d", (int16_t)(compensate_gain * info->buf[i]));
-    }
-    ets_printf("]\"\n");
+    uint16_t n = info->len > WM_CSI_MAX_LEN ? WM_CSI_MAX_LEN : info->len;
+    wm_csi_pkt_t *pkt = (wm_csi_pkt_t *)item->buf;
+    memcpy(pkt->magic, WM_CSI_MAGIC, 4);
+    pkt->node_seq = 0;  /* 송신 태스크가 채운다 */
+    pkt->len = n;
+    pkt->tx_id = rx_id;
+    pkt->local_ts = rx_ctrl->timestamp;
+    pkt->gain = compensate_gain;
+    pkt->rssi = rx_ctrl->rssi;
+    pkt->noise_floor = rx_ctrl->noise_floor;
+    pkt->channel = rx_ctrl->channel;
+    pkt->secondary = rx_ctrl->secondary_channel;
+    pkt->cwb = rx_ctrl->cwb;
+    pkt->sig_mode = rx_ctrl->sig_mode;
+    pkt->first_word_invalid = info->first_word_invalid;
+    pkt->reserved = 0;
+    memcpy(pkt->data, info->buf, n);
+    item->size = sizeof(wm_csi_pkt_t) + n;
 }
 
 static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
@@ -211,7 +219,6 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
 
     const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
     static uint32_t s_count = 0;
-    static bool s_header_printed = false;
     float compensate_gain = 1.0f;
     static uint8_t agc_gain = 0;
     static int8_t fft_gain = 0;
@@ -237,46 +244,49 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
 
     bool gw = gateway_alive();
 #if CONFIG_WM_UART_ALWAYS
-    bool print = true;          /* 케이블만 꽂으면 바로 유선 수집이 되도록 늘 USB로도 찍는다 */
+    bool print = true;          /* 케이블만 꽂으면 바로 유선 수집이 되도록 늘 USB로도 찍는다(낮은 우선순위) */
 #elif CONFIG_WM_UART_FALLBACK
     bool print = !gw;           /* 게이트웨이가 없을 때만 USB로 찍는다 */
 #else
     bool print = false;
 #endif
-
-    if (gw) {
-        queue_for_gateway(info, rx_id, compensate_gain);  /* 먼저 큐에 넣어 무선 전송이 USB 출력을 기다리지 않게 한다 */
+    if (!gw && !print) {
+        return;
     }
-    if (print) {
-        print_csi_line_like_csi_recv(info, rx_id, compensate_gain, agc_gain, fft_gain, !s_header_printed);
-        s_header_printed = true;
+
+    static csi_item_t item;     /* 와이파이 태스크 스택을 아끼려고 정적으로 둔다(콜백은 한 번에 하나씩 불린다) */
+    fill_item(info, rx_id, compensate_gain, &item);
+    if (gw && xQueueSend(s_csi_queue, &item, 0) != pdTRUE) {
+        s_queue_drop++;
+    }
+    if (print && xQueueSend(s_print_queue, &item, 0) != pdTRUE) {
+        s_print_drop++;  /* USB가 못 따라가면 USB 줄만 건너뛴다. 무선은 영향 없음 */
     }
 }
 
-static void queue_for_gateway(const wifi_csi_info_t *info, uint32_t rx_id, float compensate_gain)
+/* USB 출력: esp-csi csi_recv(ESP32-S3)와 같은 필드 순서와 같은 값((int16)(gain × 원본 바이트))으로 찍는다.
+ * 원본에서 수집 도구가 쓰지 않는 rx_ctrl 칸(rate, mcs 등)은 0이다. 게이트웨이 경로(collector.py gw_csi_line)와 같은 줄이 된다. */
+static void print_task(void *arg)
 {
-    const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
-    uint16_t n = info->len > WM_CSI_MAX_LEN ? WM_CSI_MAX_LEN : info->len;
-    csi_item_t item;
-    wm_csi_pkt_t *pkt = (wm_csi_pkt_t *)item.buf;
-    memcpy(pkt->magic, WM_CSI_MAGIC, 4);
-    pkt->node_seq = 0;  /* 송신 태스크가 채운다 */
-    pkt->len = n;
-    pkt->tx_id = rx_id;
-    pkt->local_ts = rx_ctrl->timestamp;
-    pkt->gain = compensate_gain;
-    pkt->rssi = rx_ctrl->rssi;
-    pkt->noise_floor = rx_ctrl->noise_floor;
-    pkt->channel = rx_ctrl->channel;
-    pkt->secondary = rx_ctrl->secondary_channel;
-    pkt->cwb = rx_ctrl->cwb;
-    pkt->sig_mode = rx_ctrl->sig_mode;
-    pkt->first_word_invalid = info->first_word_invalid;
-    pkt->reserved = 0;
-    memcpy(pkt->data, info->buf, n);
-    item.size = sizeof(wm_csi_pkt_t) + n;
-    if (xQueueSend(s_csi_queue, &item, 0) != pdTRUE) {
-        s_queue_drop++;
+    static csi_item_t item;
+    static char line[160 + WM_CSI_MAX_LEN * 7];
+    printf("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,"
+           "noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_format,len,first_word,data\n");
+    for (;;) {
+        if (xQueueReceive(s_print_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        const wm_csi_pkt_t *p = (const wm_csi_pkt_t *)item.buf;
+        int n = snprintf(line, sizeof(line),
+                         "CSI_DATA,%" PRIu32 "," MACSTR ",%d,0,%d,0,%d,0,0,0,0,0,0,%d,0,%d,%d,%" PRIu32 ",0,0,%d,%d,%d,\"[",
+                         p->tx_id, MAC2STR(CONFIG_CSI_SEND_MAC), p->rssi, p->sig_mode, p->cwb, p->noise_floor,
+                         p->channel, p->secondary, p->local_ts, p->sig_mode, p->len, p->first_word_invalid);
+        for (int i = 0; i < p->len && n < (int)sizeof(line) - 16; i++) {
+            n += snprintf(line + n, sizeof(line) - n, i ? ",%d" : "%d", (int16_t)(p->gain * p->data[i]));
+        }
+        n += snprintf(line + n, sizeof(line) - n, "]\"\n");
+        fputs(line, stdout);  /* 한 번에 써서 상태 로그와 줄이 섞이지 않게 한다 */
+        s_printed++;
     }
 }
 
@@ -348,21 +358,22 @@ static void status_task(void *arg)
 {
     uint8_t my_mac[6];
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, my_mac));
-    uint32_t last_csi = 0, last_sent = 0;
+    uint32_t last_csi = 0, last_sent = 0, last_printed = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         uint32_t csi = s_csi_count, sent = s_sent;
         if (gateway_alive()) {
-            ESP_LOGI(TAG, "노드 " MACSTR " | 게이트웨이 " MACSTR " | CSI %.1f Hz, 전송 %.1f Hz | 실패 %" PRIu32
-                     ", 버림 %" PRIu32 "/%" PRIu32,
+            ESP_LOGI(TAG, "노드 " MACSTR " | 게이트웨이 " MACSTR " | CSI %.1f Hz, 전송 %.1f Hz, USB %.1f Hz | "
+                     "ACK 없음 %" PRIu32 ", 큐 버림 %" PRIu32 ", 전송 버림 %" PRIu32 ", USB 건너뜀 %" PRIu32,
                      MAC2STR(my_mac), MAC2STR(s_gw_mac), (csi - last_csi) / 5.0, (sent - last_sent) / 5.0,
-                     s_send_fail, s_queue_drop, s_nomem_drop);
+                     (s_printed - last_printed) / 5.0, s_send_fail, s_queue_drop, s_nomem_drop, s_print_drop);
         } else {
             ESP_LOGW(TAG, "노드 " MACSTR " | 게이트웨이를 찾는 중 | CSI %.1f Hz%s",
                      MAC2STR(my_mac), (csi - last_csi) / 5.0, " (USB로 CSI_DATA 출력 중)");
         }
         last_csi = csi;
         last_sent = sent;
+        last_printed = s_printed;
     }
 }
 
@@ -376,7 +387,8 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     s_csi_queue = xQueueCreate(CONFIG_WM_QUEUE_LEN, sizeof(csi_item_t));
-    assert(s_csi_queue);
+    s_print_queue = xQueueCreate(4, sizeof(csi_item_t));
+    assert(s_csi_queue && s_print_queue);
 
     wifi_init();
     wifi_esp_now_init();
@@ -388,6 +400,7 @@ void app_main(void)
              MAC2STR(my_mac), CONFIG_LESS_INTERFERENCE_CHANNEL, MAC2STR(CONFIG_CSI_SEND_MAC));
 
     xTaskCreatePinnedToCore(uplink_task, "wm_uplink", 4096, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(print_task, "wm_print", 4096, NULL, 2, NULL, 1);   /* 무선(5)보다 낮게 */
     xTaskCreatePinnedToCore(status_task, "wm_status", 3072, NULL, 1, NULL, 1);
 
     wifi_csi_init();
