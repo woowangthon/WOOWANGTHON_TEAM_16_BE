@@ -85,6 +85,7 @@ class FrameIn(BaseModel):
 class IngestIn(BaseModel):
     frames: list[FrameIn] = Field(min_length=1, max_length=3000)
     source: Literal["live", "replay"] = "live"
+    restarted: bool = False  # 지난 묶음 뒤 노드가 다시 켜졌다(수집 프로그램이 노드 번호와 보드 시각으로 알아챔)
 
 
 class AlarmIn(BaseModel):

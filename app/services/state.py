@@ -15,7 +15,7 @@ from ..models import Baseline as BaselineRow
 from ..models import Building, Decision, Event, Incident, Inference, Node, Zone, utcnow
 from ..serializers import incident_out, iso
 from .registry import registry
-from .stream import DETECT_P, POSSIBLE_P, as_aware
+from .stream import DETECT_P, POSSIBLE_P, as_aware, hub
 
 EMA_ALPHA = 0.5
 RECENT_ROWS = 12
@@ -41,6 +41,7 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
     if ids:
         calibrated = set(db.scalars(select(BaselineRow.node_id).where(
             BaselineRow.node_id.in_(ids), BaselineRow.active.is_(True))).all())
+    restarted = {n.id for n in rx if n.id in calibrated and hub.restarted_since_baseline(db, n.id)}
     out: dict[int, dict] = {}
     for n in rx:
         rows = list(reversed(db.scalars(
@@ -62,6 +63,8 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
         reason = None
         if n.id not in calibrated:
             status = "uncalibrated"
+        elif n.id in restarted:
+            status, reason = "stale", "restarted"  # 신호는 오지만 기준선과 크기 기준이 어긋났을 수 있음
         elif freeze and good:
             status = "ok"
         elif age is None or age > settings.stale_seconds:

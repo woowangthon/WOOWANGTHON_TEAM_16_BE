@@ -106,8 +106,38 @@ class StreamHub:
         self._baseline_cache[node_id] = (row.id, base)
         return base
 
+    @staticmethod
+    def restarted_since_baseline(db: Session, node_id: int) -> bool:
+        """지금 기준선을 만든 뒤 노드가 다시 켜졌는가.
+
+        노드는 켜진 뒤 처음 패킷 100개로 이득(신호를 키우는 정도) 기준을 정한다. 다시 켜지면 그 기준이
+        달라질 수 있어, 방이 그대로여도 신호 크기가 기준선과 어긋난다. 다시 보정하기 전까지는 판단하지 않는다.
+        """
+        made = db.scalar(select(BaselineRow.created_at)
+                         .where(BaselineRow.node_id == node_id, BaselineRow.active.is_(True))
+                         .order_by(BaselineRow.id.desc()))
+        if made is None:
+            return False
+        last = db.scalar(select(Event.created_at)
+                         .where(Event.node_id == node_id, Event.kind == "node_restart")
+                         .order_by(Event.id.desc()))
+        return last is not None and as_aware(last) > as_aware(made)
+
+    def _note_restart(self, db: Session, node: Node, calibrating: bool) -> None:
+        incident = self.active_incident(db, node.building_id)
+        if calibrating:
+            self._calib.pop(node.id, None)  # 다시 켜지기 전 신호는 크기 기준이 달라 기준선에 섞지 않는다
+            message = f"{node.name}: 보정 중에 보드가 다시 켜졌습니다. 그 전까지 모은 신호는 버리고 다시 모읍니다."
+        else:
+            message = (f"{node.name}: 보드가 다시 켜졌습니다. 신호 크기 기준이 바뀌었을 수 있어, "
+                       "다시 보정할 때까지 이 노드는 판단하지 않습니다.")
+        db.add(Event(building_id=node.building_id, incident_id=None if incident is None else incident.id,
+                     zone_id=node.zone_id, node_id=node.id, kind="node_restart", message=message))
+        db.flush()  # 세션이 자동 flush를 하지 않아, 바로 뒤 restarted_since_baseline이 이 기록을 보게 한다
+
     # ---- 수신 --------------------------------------------------------
-    def ingest(self, db: Session, node: Node, frames: list[Frame], source: str = "live") -> dict:
+    def ingest(self, db: Session, node: Node, frames: list[Frame], source: str = "live",
+               restarted: bool = False) -> dict:
         now = utcnow()
         with self._lock:
             node.last_seen_at = now
@@ -115,6 +145,8 @@ class StreamHub:
                 node.last_rssi = frames[-1].rssi
 
             run = self.active_calibration(db, node.building_id)
+            if restarted:
+                self._note_restart(db, node, calibrating=run is not None)
             if run is not None:
                 buf = self._calib.setdefault(node.id, [])
                 buf.extend(frames)
@@ -134,6 +166,9 @@ class StreamHub:
             if base is None:
                 db.commit()
                 return {"mode": "incident", "accepted": 0, "reason": "uncalibrated"}
+            if self.restarted_since_baseline(db, node.id):
+                db.commit()
+                return {"mode": "incident", "accepted": 0, "reason": "restarted"}
 
             buf = self._buffers.setdefault(node.id, _NodeBuffer())
             if buf.incident_id != incident.id:

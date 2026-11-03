@@ -27,7 +27,7 @@ def ingest_csi(body: IngestIn, node: Node = Depends(node_from_token), db: Sessio
             bad += 1
             continue
         frames.append(Frame(item.t, float("nan") if item.rssi is None else float(item.rssi), amp))
-    result = hub.ingest(db, node, frames, source=body.source)
+    result = hub.ingest(db, node, frames, source=body.source, restarted=body.restarted)
     result["rejected"] = bad
     return result
 

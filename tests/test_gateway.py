@@ -203,7 +203,7 @@ def test_live_sends_each_gateway_node_with_its_token(fake_gateway, monkeypatch):
     posted: dict[str, int] = {}
     lock = threading.Lock()
 
-    def fake_post(api, token, frames, source="live"):
+    def fake_post(api, token, frames, source="live", restarted=False):
         assert all(len(f["data"]) == 384 for f in frames)
         with lock:
             posted[token] = posted.get(token, 0) + len(frames)
@@ -278,12 +278,53 @@ def test_node_port_drops_oldest_instead_of_blocking_hub():
     assert port.readline() == b"fresh\n"  # 녹화 시작 뒤에는 새 줄만 나온다
 
 
+def _pkt(seq: int, ts: int) -> dict:
+    return {"node_seq": seq, "local_ts": ts, "gw_rssi": -50, "values": [0] * 4}
+
+
 def test_node_restart_is_counted_not_lost():
     hub = _QuietHub()
     port = collector._GatewayNodePort(hub, MAC_A)
     st = hub.stats[MAC_A] = collector._NodeStats()
+    hour = 3_600_000_000
     for seq in (500, 501, 503):
-        st.add({"node_seq": seq, "gw_rssi": -50, "values": [0] * 4})
+        st.add(_pkt(seq, hour + seq * 11_000))
     assert st.lost == 1 and st.resets == 0 and port.restarts_since_open() == 0
-    st.add({"node_seq": 0, "gw_rssi": -50, "values": [0] * 4})  # 전원이 빠졌다 들어와 번호가 0부터
+    st.add(_pkt(0, 2_000_000))  # 전원이 빠졌다 들어와 번호와 보드 시각이 처음부터
     assert st.lost == 1 and st.resets == 1 and port.restarts_since_open() == 1
+
+
+def test_restart_needs_both_counter_and_clock():
+    st = collector._NodeStats()
+    t = 3_600_000_000
+    st.add(_pkt(100, t))
+    st.add(_pkt(2100, t + 25_000_000))  # 25초 끊겼다 돌아옴(시각은 이어짐): 잃은 것이지 재시작이 아니다
+    assert st.resets == 0 and st.lost == 1999
+    st.add(_pkt(2100, t + 25_000_000))  # 같은 패킷이 두 번: 세지 않는다
+    assert st.resets == 0 and st.lost == 1999 and st.frames == 2
+    st.add(_pkt(2101, 2**32 - 5_000))
+    st.add(_pkt(2102, 6_000))  # 약 72분마다 오는 보드 시각 되감김(번호는 이어짐)
+    assert st.resets == 0 and st.lost == 1999
+    st2 = collector._NodeStats()
+    st2.add(_pkt(65535, t))
+    st2.add(_pkt(0, 1_500_000))  # 번호가 65535에서 우연히 0으로 이어져도 시각이 처음이면 재시작
+    assert st2.resets == 1 and st2.lost == 0
+
+
+def test_live_sender_carries_restart_flag(monkeypatch):
+    sent = []
+
+    def fake_post(api, token, frames, source="live", restarted=False):
+        sent.append((len(frames), restarted))
+        if len(sent) == 1:
+            raise collector.urllib.error.URLError("서버 꺼짐")
+        return {"mode": "incident"}
+
+    monkeypatch.setattr(collector, "_post", fake_post)
+    stop, lock = threading.Event(), threading.Lock()
+    queue = [{"t": 1.0, "rssi": -40, "data": [1, 2]}]
+    flags = {"restarted": True}
+    stop.set()  # 큐가 빌 때까지만 돈다
+    collector._sender_loop("http://x", "tok", queue, lock, stop, "live", flags)
+    # 처음 보낼 때 실패해도 재시작 알림은 다음 묶음에 다시 실린다
+    assert sent == [(1, True), (1, True)] and flags == {}

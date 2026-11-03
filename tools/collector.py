@@ -111,7 +111,10 @@ GW_MAX_PAYLOAD = 1600
 GW_ITEM_HEAD = 8  # 노드 MAC(6) + 게이트웨이에서 잰 rssi(1) + 예약(1)
 GW_CSI_PKT = struct.Struct("<4sHHIIfbbBBBBBB")  # wm_csi_pkt_t 헤더 28바이트
 GW_CSI_MAGIC = b"WMC1"
-GW_SEQ_RESET = 1000  # 노드 번호가 이만큼 넘게 뛰면 노드가 다시 켜진 것으로 보고 손실로 세지 않는다
+GW_SEQ_RESET = 1000  # 노드 번호가 이만큼 안쪽으로 뒤로 가면 이미 받은 것(중복·순서 바뀜)으로 보고 세지 않는다
+# 노드가 다시 켜지면 번호와 보드 시각(local_ts, 켜진 뒤 µs)이 함께 처음으로 돌아간다. 시각만 보고 판단하면
+# 약 72분마다 오는 시각 되감김을, 번호만 보고 판단하면 오래 끊겼다 돌아온 것을 재시작으로 잘못 센다.
+GW_BOOT_TS_MAX = 600_000_000  # 다시 켜진 노드의 첫 패킷은 켜진 지 10분 안의 시각이어야 한다
 
 _GATEWAY = {"port": os.environ.get("WATCHMATE_GATEWAY", ""), "baud": GW_BAUD}
 
@@ -209,22 +212,27 @@ class _NodeStats:
     def __init__(self) -> None:
         self.frames = 0
         self.lost = 0
-        self.resets = 0  # 노드가 다시 켜진 횟수(번호가 크게 뜀). 이득 보정 기준도 다시 잡힌다
+        self.resets = 0  # 노드가 다시 켜진 횟수. 이득 보정 기준도 다시 잡힌다
         self.last_seq: int | None = None
+        self.last_ts = 0
         self.gw_rssi: list[int] = []
         self.lengths: Counter = Counter()
         self.first_t = time.time()
         self.last_t = 0.0
 
     def add(self, d: dict) -> None:
-        seq = d["node_seq"]
+        seq, ts = d["node_seq"], d["local_ts"]
         if self.last_seq is not None:
             gap = (seq - self.last_seq - 1) % 65536
-            if 0 < gap < GW_SEQ_RESET:
-                self.lost += gap
-            elif gap >= GW_SEQ_RESET:
+            # 시각이 처음으로 돌아갔고, 번호도 이어지지 않거나 시각 되감김 직전이 아니었으면 다시 켜진 것
+            if ts < self.last_ts and ts < GW_BOOT_TS_MAX and (
+                    gap >= GW_SEQ_RESET or self.last_ts < 2**32 - GW_BOOT_TS_MAX):
                 self.resets += 1
-        self.last_seq = seq
+            elif gap >= 65536 - GW_SEQ_RESET:
+                return  # 이미 받은 번호
+            else:
+                self.lost += gap  # 오래 끊겼다 돌아와도 다시 켜진 것이 아니면 잃은 것으로 센다
+        self.last_seq, self.last_ts = seq, ts
         self.frames += 1
         self.gw_rssi.append(d["gw_rssi"])
         del self.gw_rssi[:-500]
@@ -485,8 +493,11 @@ def _lines(ser, deadline: float | None = None, stop: threading.Event | None = No
         yield time.time(), rec.rssi, rec.raw
 
 
-def _post(api: str, token: str, frames: list[dict], source: str = "live") -> dict:
-    body = json.dumps({"frames": frames, "source": source}).encode()
+def _post(api: str, token: str, frames: list[dict], source: str = "live", restarted: bool = False) -> dict:
+    payload: dict = {"frames": frames, "source": source}
+    if restarted:
+        payload["restarted"] = True  # 지난 묶음 뒤 노드가 다시 켜졌다
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(
         api.rstrip("/") + "/api/ingest/csi", data=body, method="POST",
         headers={"Content-Type": "application/json", "X-Node-Token": token},
@@ -937,16 +948,19 @@ def _log_scene(log, sc: dict, saved: dict[str, tuple[Path, int, float]]) -> None
 
 # ---------------------------------------------------------------- 서버로 보내기(live, send)
 
-def _sender_loop(api, token, queue, lock, stop, source):
+def _sender_loop(api, token, queue, lock, stop, source, flags=None):
+    """flags["restarted"]가 켜져 있으면 다음 묶음에 실어 보내고 끈다. 보내지 못하면 다시 켜 둔다."""
+    flags = {} if flags is None else flags
     while not stop.is_set() or queue:
         time.sleep(0.5)
         with lock:
             batch = queue[:2000]
             del queue[:len(batch)]
+            restarted = flags.pop("restarted", False) if batch else False
         if not batch:
             continue
         try:
-            res = _post(api, token, batch, source)
+            res = _post(api, token, batch, source, restarted)
             print(f"  전송 {len(batch):4d} → 모드 {res.get('mode')} 창 {res.get('windows', 0)}", end="\r")
         except urllib.error.HTTPError as exc:
             print(f"\n서버 오류 {exc.code}: {exc.read().decode(errors='ignore')[:200]}")
@@ -954,6 +968,8 @@ def _sender_loop(api, token, queue, lock, stop, source):
             print(f"\n전송 실패({exc}). 다음 묶음에서 다시 시도합니다.")
             with lock:
                 queue[:0] = batch[-1000:]  # 너무 오래된 것은 버리고 최근 것만 다시 보낸다
+                if restarted:
+                    flags["restarted"] = True
 
 
 def cmd_live(args) -> None:
@@ -973,18 +989,27 @@ def cmd_live(args) -> None:
         ser = _open_serial(port, args.baud)
         q: list[dict] = []
         lock = threading.Lock()
-        sender = threading.Thread(target=_sender_loop, args=(args.api, token, q, lock, stop, "live"), daemon=True)
+        flags: dict = {}
+        sender = threading.Thread(target=_sender_loop, args=(args.api, token, q, lock, stop, "live", flags),
+                                  daemon=True)
         save = None
         if args.save_dir:
             safe = "".join(ch if ch.isalnum() else "-" for ch in port)
             save = (Path(args.save_dir) / f"live_{safe}_{stamp}.csv").open("w", newline="", encoding="utf-8")
             csv.writer(save).writerow(["t", "rssi", "data"])
 
-        def reader(ser=ser, q=q, lock=lock, save=save) -> None:
+        def reader(ser=ser, q=q, lock=lock, save=save, flags=flags, port=port) -> None:
             w = csv.writer(save) if save else None
+            # 게이트웨이 노드만 다시 켜진 것을 안다(노드 번호와 보드 시각). USB로 꽂은 노드는 알 수 없다
+            restarts = getattr(ser, "restarts_since_open", None)
+            seen = 0
             for t, rssi, raw in _lines(ser, stop=stop):
                 with lock:
                     q.append({"t": t, "rssi": rssi, "data": raw})
+                    if restarts is not None and restarts() > seen:
+                        seen = restarts()
+                        flags["restarted"] = True
+                        print(f"\n{port}: 보드가 다시 켜졌습니다. 서버는 다시 보정할 때까지 이 노드를 판단에서 뺍니다.")
                 if w:
                     _write_frame(w, t, rssi, raw)
 
@@ -1018,18 +1043,18 @@ def cmd_gateway(args) -> None:
     hub = _GatewayHub.get(_GATEWAY["port"], _GATEWAY["baud"])
     print(f"{_GATEWAY['port']}에서 {args.seconds:.0f}초 동안 듣습니다. 노드와 TX-1을 켜 두세요.")
     try:
-        start = {mac: (st.frames, st.lost) for mac, st in hub.stats.items()}
+        start = {mac: (st.frames, st.lost, st.resets) for mac, st in hub.stats.items()}
         time.sleep(args.seconds)
         status, bad = hub.status, hub.reader.bad_crc
         rows = []
         for mac, st in sorted(hub.stats.items()):
-            f0, l0 = start.get(mac, (0, 0))
+            f0, l0, r0 = start.get(mac, (0, 0, 0))
             got, lost = st.frames - f0, st.lost - l0
             if got == 0:
                 continue
             length = st.lengths.most_common(1)[0][0]
             rssi = statistics.fmean(st.gw_rssi) if st.gw_rssi else float("nan")
-            rows.append((mac, got, got / args.seconds, lost / max(got + lost, 1), length, rssi))
+            rows.append((mac, got, got / args.seconds, lost / max(got + lost, 1), length, rssi, st.resets - r0))
     finally:
         hub.release()
     if status:
@@ -1043,10 +1068,14 @@ def cmd_gateway(args) -> None:
         print("들어오는 노드가 없습니다. 노드에 csi_node를 올렸는지, 전원이 켜졌는지, TX-1이 켜졌는지 확인하세요.")
         sys.exit(1)
     names = {m: n for n, m in load_node_names().items()}
-    print(f"\n{'노드 MAC':<19}{'이름표':<10}{'받음':>7}{'초당':>8}{'잃음':>8}{'값 개수':>8}{'게이트웨이 RSSI':>16}")
-    for mac, got, hz, loss, length, rssi in rows:
+    print(f"\n{'노드 MAC':<19}{'이름표':<10}{'받음':>7}{'초당':>8}{'잃음':>8}{'값 개수':>8}{'게이트웨이 RSSI':>16}"
+          f"{'재시작':>7}")
+    for mac, got, hz, loss, length, rssi, resets in rows:
         name = names.get(mac, "?")
-        print(f"{mac:<19}{name:<10}{got:>7}{hz:>8.1f}{loss:>8.1%}{length:>8}{rssi:>13.0f} dBm")
+        print(f"{mac:<19}{name:<10}{got:>7}{hz:>8.1f}{loss:>8.1%}{length:>8}{rssi:>13.0f} dBm{resets:>7}")
+    restarted = [names.get(r[0], r[0]) for r in rows if r[6]]
+    if restarted:
+        print(f"\n듣는 동안 다시 켜진 노드: {', '.join(restarted)}. 충전기·케이블이 헐겁거나 전원이 약한지 확인하세요.")
     unknown = [mac for mac, *_ in rows if mac not in names]
     missing = [n for n, m in sorted((n, m) for m, n in names.items()) if m not in {r[0] for r in rows}]
     if missing:
