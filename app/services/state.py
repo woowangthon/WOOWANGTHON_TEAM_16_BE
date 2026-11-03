@@ -49,7 +49,7 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
             .order_by(Inference.id.desc())
             .limit(RECENT_ROWS)
         ).all()))
-        # 프레임이 모자란 창은 특징이 사람 없이도 커지므로 확률 계산에 넣지 않는다
+        # 프레임이 모자란 창은 특징이 사람 없이도 커질 수 있으므로 확률 계산에 넣지 않는다
         good = [r for r in rows if r.quality is None or r.quality >= MIN_WINDOW_QUALITY]
         low_rate = bool(rows) and rows[-1].quality is not None and rows[-1].quality < MIN_WINDOW_QUALITY
         ema = None

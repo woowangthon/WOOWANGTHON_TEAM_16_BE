@@ -93,7 +93,7 @@ def _windows(session: Session, base: Baseline,
              start_after: float | None = None) -> tuple[WindowSet | None, WindowCount]:
     """세션을 2초 창으로 자른다. 프레임이 모자란 창은 빼고 그 수를 함께 돌려준다.
 
-    무선 손실로 프레임이 빠지면 특징이 사람 없이도 커진다. 사람 장면일수록 프레임이 덜 들어오면
+    무선 손실로 프레임이 뭉텅이로 빠지면 특징이 사람 없이도 커진다. 사람 장면일수록 프레임이 덜 들어오면
     모델이 신호 대신 '덜 들어옴'을 배우므로, 그런 창은 학습·평가에서 빼고 모델 카드에 수를 남긴다.
     """
     count = WindowCount()
