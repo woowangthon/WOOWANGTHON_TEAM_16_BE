@@ -1,0 +1,10 @@
+﻿run_id,date,order,step,place,layout,node_firmware,gateway_firmware,tx1_power,people,command,seconds,note
+R01,2026-11-01,1,USB 점검,노트북 책상,TX-1에서 2m에 RX-301·RX-302를 30cm 간격으로 나란히,csi_recv(esp-csi 8633d67),-,보조배터리,정지,check --port COM4 --port COM5,10,TX-1 전원이 보조배터리. 송신 추정 18~23Hz로 낮음
+R02,2026-11-01,2,USB 점검,노트북 책상,"RX-301만 USB, TX-1은 노트북 USB 전원",csi_recv(esp-csi 8633d67),-,노트북 USB,정지,check --port COM4,10,"R01과 같은 보드, TX-1 전원만 바꿈. 초당 16→74"
+R03,2026-11-03,3,무선 점검 1차,223호,"책상 배치: TX-1 방 가운데, RX 3개 TX-1에서 2m(RX-301은 나무 가벽 너머), GW·노트북 TX-1에서 2m","csi_node(1801efd, USB 출력이 와이파이 콜백 안)",csi_gateway(1801efd),충전기,정지(추정),gateway,5,게이트웨이 up 160s
+R04,2026-11-03,4,무선 점검 1차,223호,R03과 같음,csi_node(1801efd),csi_gateway(1801efd),충전기,정지(추정),check --port gw:RX-301 --port gw:RX-302 --port gw:RX-COR,10,두 노드 손실 약 22% → 원인: USB 출력이 와이파이 처리를 막음
+R05,2026-11-03,5,무선 점검 2차(펌웨어 수정 뒤),223호,R03과 같음,"csi_node(aafccf9, USB 출력 분리)",csi_gateway(1801efd),충전기,정지(추정),gateway,5,게이트웨이 up 6s(재부팅 직후)
+R06,2026-11-03,6,무선 점검 2차,223호,R03과 같음,csi_node(aafccf9),csi_gateway(1801efd),충전기,정지(추정),check --port gw:RX-301 --port gw:RX-302 --port gw:RX-COR,10,RX-301 자리만 손실 8.8%
+R07,2026-11-03,7,자리 바꾸기 시험,223호,R03에서 RX-301과 RX-302의 자리를 맞바꿈,csi_node(aafccf9),csi_gateway(1801efd),충전기,정지(추정),check --port gw:RX-301 --port gw:RX-302 --port gw:RX-COR,10,손실이 보드가 아니라 가벽 뒤 자리를 따라감
+R08,2026-11-03,8,실제 배치 점검,223호·224호·복도,"실제 배치(docs/site/s4-1_2f_layout_1103.png), GW 205호 앞 복도",csi_node(aafccf9),csi_gateway(1801efd),충전기,사람이 오감,gateway,5,사람 움직임으로 숫자가 나빠진 것으로 봄. 게이트웨이 up 198s
+R09,2026-11-03,9,실제 배치 점검,223호·224호·복도,R08과 같음,csi_node(aafccf9),csi_gateway(1801efd),충전기,정지,gateway,5,통과. 게이트웨이 up 650s
