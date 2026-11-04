@@ -156,6 +156,10 @@ python -m app.ml.train --data ../data/sessions --out models/presence_model.jobli
 
 무선 노드를 게이트웨이로 받을 때는 포트 자리에 `gw:<노드 MAC>`을 쓰고 `--gateway COM7`을 붙입니다. 저장소 루트의 `nodes.csv`에 이름표와 MAC을 적어 두면 `--node RX-301=gw`처럼 이름으로 씁니다. 펌웨어 올리기와 무선 점검은 [docs/WIRELESS.md](docs/WIRELESS.md)에 있습니다.
 
+`session`과 `record`는 장면 CSV와 함께 `--out/_raw/<실행별 고유 폴더>/`에 노드별 연속 원본, `events.jsonl`, `manifest.json`을 자동 저장합니다. 준비·카운트다운·Enter 대기·재촬영 구간도 남기며, Enter로 장면을 시작하는 방식과 학습용 CSV의 `t,rssi,data` 형식은 그대로입니다. 취소한 장면 파일은 지워도 원본은 보관하며, 학습·비교표는 `_raw`를 제외합니다.
+
+원본은 컴퓨터가 받은 시리얼 줄 또는 게이트웨이가 복원한 `CSI_DATA` 줄이므로 모든 무선 패킷의 수신을 보장하지는 않습니다. 원본 저장 실패·대기열 초과 시에는 수집을 멈추고 `manifest.json`에 `incomplete`를 남깁니다. 저장 공간은 장면 CSV만 저장할 때의 대략 2배 안팎이며 대기가 길면 더 늘어납니다. 실제 보드 3개로 장시간 연속 보관하는 확인은 남아 있습니다. 자세한 파일 구성은 [연속 원본과 장면 CSV](docs/DATA_COLLECTION.md#연속-원본과-장면-csv)를 참고합니다.
+
 원시 세션(`data/`)은 저장소에 올리지 않고 팀 드라이브에 둡니다. 저장소에는 학습된 모델과 모델 카드, 시연용 녹화 시나리오만 올립니다.
 
 ## 실제 노드로 쓰기

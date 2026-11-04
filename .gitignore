@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .env
 data/
+_raw/
 sample_data/_dev_synthetic/
 *.db
 *.db-wal

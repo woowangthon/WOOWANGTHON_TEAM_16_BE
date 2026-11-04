@@ -61,11 +61,13 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from pathlib import Path
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.ml.csi import parse_esp_csi_record  # noqa: E402
 from app.ml.sessions import LABELS  # noqa: E402
+from tools.recording_archive import RecordingArchive, RecordingError  # noqa: E402
 
 DEFAULT_BAUD = 921600  # csi_recv 예제의 sdkconfig.defaults(CONFIG_ESP_CONSOLE_UART_BAUDRATE)
 SEND_MAC = "1a:00:00:00:00:00"  # csi_send 예제가 쓰는 송신 MAC. csi_recv는 이 MAC의 패킷만 출력한다
@@ -329,6 +331,8 @@ class _GatewayNodePort:
         self.q: "queue_mod.Queue[bytes]" = queue_mod.Queue(maxsize=5000)
         self.closed = False
         self.dropped = 0
+        self._capture_callback = None
+        self._capture_lock = threading.Lock()
         self._resets_at_open = self._resets()
         hub.subscribe(self)
 
@@ -338,6 +342,13 @@ class _GatewayNodePort:
         session이 장면 사이에 Enter를 기다리는 동안 아무도 큐를 읽지 않는다. 여기서 허브가 기다리면
         게이트웨이 포트 읽기가 통째로 멈추고, 다음 장면 앞에 오래된 프레임이 지금 시각으로 섞인다.
         """
+        with self._capture_lock:
+            capture = self._capture_callback
+        if capture is not None:
+            # record/session 원본은 버림 가능한 표시용 대기줄을 거치기 전에 받는다.
+            # 콜백은 디스크에 쓰지 않고 전용 writer로 넘기므로 허브를 막지 않는다.
+            capture(line)
+            return
         while True:
             try:
                 self.q.put_nowait(line)
@@ -348,6 +359,12 @@ class _GatewayNodePort:
                     self.dropped += 1
                 except queue_mod.Empty:
                     pass
+
+    def set_capture(self, callback) -> None:
+        """녹화 명령의 연속 원본 수신기를 연결한다. 실제 COM 포트를 다시 열지 않는다."""
+        with self._capture_lock:
+            self._capture_callback = callback
+        self.reset_input_buffer()
 
     def _resets(self) -> int:
         st = self.hub.stats.get(self.mac)
@@ -697,71 +714,54 @@ def _record_targets(args) -> list[tuple[str, str, str]]:
 
 
 def _record_scene(sers: dict, labels: dict[str, str], seconds: float, countdown: int, out: Path, day: str,
-                  meta_extra: dict) -> dict[str, tuple[Path, int, float]]:
-    """노드 여러 개를 같은 시각에 녹화한다. sers: 노드→열린 포트, labels: 노드→라벨.
-
-    돌려주는 값: 노드 → (CSV 경로, 프레임 수, 녹화 초). 포트는 닫지 않는다.
-    """
+                  meta_extra: dict, capture: RecordingArchive) -> dict[str, tuple[Path, int, float]]:
+    """연속 원본에서 지금 장면 구간만 기존 학습 CSV로 함께 기록한다."""
     out.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%H%M%S")
+    stamp = time.strftime("%H%M%S") + "_" + uuid4().hex[:8]
     nodes = list(labels)
     desc = ", ".join(f"{n}={labels[n]}" for n in nodes)
     print(f"[{desc}] {countdown}초 뒤 {seconds:.0f}초 동안 녹화합니다. 자세를 잡아 주세요.")
-    time.sleep(countdown)
-    started = time.time()
-    deadline = started + seconds
-    counts = {n: 0 for n in nodes}
+    capture.mark("countdown", labels=labels, seconds=countdown)
+    capture.wait(countdown)
     saved: dict[str, tuple[Path, int, float]] = {}
-    restarts: dict[str, int] = {}
-    stop = threading.Event()
     sids = {n: f"{day}_{n}_{labels[n]}_{stamp}" for n in nodes}
-
-    def worker(node: str) -> None:
-        sid = sids[node]
-        csv_path = out / f"{sid}.csv"
-        ser = sers[node]
-        ser.reset_input_buffer()
-        with csv_path.open("w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh)
-            w.writerow(["t", "rssi", "data"])
-            for t, rssi, raw in _lines(ser, deadline, stop):
-                _write_frame(w, t, rssi, raw)
-                counts[node] += 1
-        took = round(time.time() - started, 1)
-        if hasattr(ser, "restarts_since_open"):
-            restarts[node] = ser.restarts_since_open()
-        meta = {"session_id": sid, "node": node, "label": labels[node], "day": day, "started_at": started,
-                "frames": counts[node], "seconds": took, "recorded_with": nodes,
-                "node_restarts": restarts.get(node, 0), **meta_extra}
-        (out / f"{sid}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        saved[node] = (csv_path, counts[node], took)
-
-    threads = [threading.Thread(target=worker, args=(n,), daemon=True) for n in nodes]
-    for th in threads:
-        th.start()
+    paths = {n: out / f"{sids[n]}.csv" for n in nodes}
+    started = capture.start_scene(sids, labels, paths, seconds)
+    mono_start = time.monotonic()
     try:
-        while any(th.is_alive() for th in threads):
-            elapsed = max(time.time() - started, 1e-6)
-            status = "  ".join(f"{n} {c}개({c / elapsed:.0f}Hz)" for n, c in counts.items())
+        while (elapsed := time.monotonic() - mono_start) < seconds:
+            counts = capture.counts
+            status = "  ".join(f"{n} {counts.get(n, 0)}개({counts.get(n, 0) / max(elapsed, 1e-6):.0f}Hz)" for n in nodes)
             print(f"  {min(elapsed, seconds):5.1f}초  {status}", end="\r")
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        # 중간에 멈춘 장면은 라벨이 맞는지 보장할 수 없으니 남기지 않는다
-        stop.set()
-        for th in threads:
-            th.join(timeout=3)
+            capture.wait(min(0.5, seconds - elapsed))
+        counts, took = capture.finish_scene()
+    except BaseException:
+        files_closed = False
+        try:
+            capture.finish_scene(cancelled=True)
+            files_closed = True
+        except RecordingError:
+            pass
         for sid in sids.values():
-            (out / f"{sid}.csv").unlink(missing_ok=True)
+            # 실패한 writer가 아직 파일을 소유할 수 있다. 메타데이터가 없으면 학습에 들어가지 않는다.
+            if files_closed:
+                (out / f"{sid}.csv").unlink(missing_ok=True)
             (out / f"{sid}.json").unlink(missing_ok=True)
-        print("\n녹화를 멈췄습니다. 이 장면 파일은 지웠습니다.")
+        print("\n녹화를 멈췄습니다. 미완성 장면은 학습에서 제외하며 연속 원본은 남깁니다.")
         raise
     print()
     for node in nodes:
-        path, n, took = saved[node]
+        sid, path, n = sids[node], paths[node], counts[node]
+        restarts = sers[node].restarts_since_open() if hasattr(sers[node], "restarts_since_open") else 0
+        meta = {"session_id": sid, "node": node, "label": labels[node], "day": day, "started_at": started,
+                "frames": n, "seconds": took, "recorded_with": nodes, "node_restarts": restarts,
+                "raw_archive": str(capture.path.relative_to(out)), **meta_extra}
+        path.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        saved[node] = (path, n, took)
         print(f"저장: {path.name} ({n}프레임, {n / max(took, 1e-6):.0f}Hz)")
         if n < seconds * MIN_HZ:
             print(f"  경고: {node}의 초당 프레임이 {MIN_HZ:.0f}개보다 적습니다. 송신 보드·거리·USB 연결을 확인하세요.")
-        if restarts.get(node):
+        if restarts:
             print(f"  경고: {node}가 이 수집을 시작한 뒤 다시 켜졌습니다(전원이 잠깐 빠졌을 수 있음). "
                   "보드가 신호 크기 기준을 다시 잡으므로, 명령을 다시 시작해 그날 start_empty부터 다시 찍으세요.")
     return saved
@@ -774,12 +774,16 @@ def cmd_record(args) -> None:
     RX-301은 lying, 옆 구역 노드들은 neighbor다.
     """
     targets = _record_targets(args)
-    sers = {node: _open_serial(port, args.baud) for port, node, _ in targets}
+    sers = {}
     labels = {node: label for _, node, label in targets}
     zone = args.zone if len(targets) == 1 else ""
     try:
-        _record_scene(sers, labels, args.seconds, args.countdown, Path(args.out), args.day,
-                      {"zone": zone, "people": args.people, "notes": args.notes})
+        for port, node, _ in targets:
+            sers[node] = _open_serial(port, args.baud)
+        with RecordingArchive(sers, Path(args.out), args.day, parse_esp_csi_record, _write_frame) as capture:
+            print(f"연속 원본: {capture.path} (준비 시간 포함, 학습에서는 제외)")
+            _record_scene(sers, labels, args.seconds, args.countdown, Path(args.out), args.day,
+                          {"zone": zone, "people": args.people, "notes": args.notes}, capture)
     finally:
         for ser in sers.values():
             ser.close()
@@ -854,6 +858,28 @@ def _ask(prompt: str) -> str:
         return "q"
 
 
+def _ask_during_capture(prompt: str, capture: RecordingArchive) -> str:
+    """Enter를 기다리는 동안에도 원본 저장 실패를 주 스레드에 전달한다."""
+    ready = threading.Event()
+    result = {}
+
+    def read_answer():
+        try:
+            result["answer"] = _ask(prompt)
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            ready.set()
+
+    threading.Thread(target=read_answer, daemon=True, name="collection-input").start()
+    while not ready.wait(0.05):
+        capture.check()
+    capture.check()
+    if "error" in result:
+        raise result["error"]
+    return result["answer"]
+
+
 def cmd_session(args) -> None:
     """수집 날 진행. 장면 목록을 차례로 보여 주고, 장면마다 모든 수신 노드를 같은 시각에 녹화한다.
 
@@ -876,60 +902,82 @@ def cmd_session(args) -> None:
     out.mkdir(parents=True, exist_ok=True)
     log_path = out / "session_log.csv"
     new_log = not log_path.exists()
-    sers = {n: _open_serial(ports[n], args.baud) for n in plan_nodes}
+    sers = {}
     total = sum(p["seconds"] for p in plan[start:])
     print(f"장면 {len(plan) - start}개, 녹화만 약 {total / 60:.0f}분입니다. 노드: "
           + ", ".join(f"{n}={ports[n]}" for n in plan_nodes))
     done, i, resume = 0, start, None
+    stopped = False
     try:
-        with log_path.open("a", newline="", encoding="utf-8-sig") as logf:
-            log = csv.writer(logf)
-            if new_log:
-                log.writerow(["시각", "장면", "설명", "노드", "라벨", "인원", "초", "프레임", "Hz", "파일"])
-            for i in range(start, len(plan)):
-                sc = plan[i]
-                resume = sc["scene"]  # 여기서 멈추면 이 장면부터 다시 한다
-                print(f"\n[{i + 1}/{len(plan)}] {sc['scene']}  {sc['seconds']:.0f}초  장면 전체 인원 {sc['people']}명")
-                print(f"  {sc['description']}")
-                print("  라벨: " + ", ".join(f"{n}={lab}" for n, lab in sc["labels"].items()))
-                saved = None
-                while True:
-                    if not args.yes:
-                        ans = _ask("  준비되면 Enter, 이 장면 건너뛰기 s, 끝내기 q: ")
-                        if ans == "q":
-                            raise _Stop
-                        if ans == "s":
-                            break
-                    saved = _record_scene(sers, sc["labels"], sc["seconds"], args.countdown, out, args.day,
-                                          {"zone": "", "people": sc["people"], "notes": args.notes,
-                                           "scene": sc["scene"], "description": sc["description"]})
-                    if args.yes:
-                        break
-                    ans = _ask("  Enter 다음 장면 / r 다시 찍기 / q 끝내기: ")
-                    if ans == "r":
-                        for path, _, _ in saved.values():
-                            path.unlink(missing_ok=True)
-                            path.with_suffix(".json").unlink(missing_ok=True)
+        for node in plan_nodes:
+            sers[node] = _open_serial(ports[node], args.baud)
+        with RecordingArchive(sers, out, args.day, parse_esp_csi_record, _write_frame) as capture:
+            print(f"연속 원본: {capture.path} (준비·대기·재촬영 포함, 학습에서는 제외)")
+            try:
+                with log_path.open("a", newline="", encoding="utf-8-sig") as logf:
+                    log = csv.writer(logf)
+                    if new_log:
+                        log.writerow(["시각", "장면", "설명", "노드", "라벨", "인원", "초", "프레임", "Hz", "파일"])
+                    for i in range(start, len(plan)):
+                        sc = plan[i]
+                        resume = sc["scene"]
+                        print(f"\n[{i + 1}/{len(plan)}] {sc['scene']}  {sc['seconds']:.0f}초  장면 전체 인원 {sc['people']}명")
+                        print(f"  {sc['description']}")
+                        print("  라벨: " + ", ".join(f"{n}={lab}" for n, lab in sc["labels"].items()))
                         saved = None
-                        print("  방금 녹화한 파일을 지웠습니다. 다시 찍습니다.")
-                        continue
-                    if ans == "q":
-                        _log_scene(log, sc, saved)
-                        done += 1
-                        resume = plan[i + 1]["scene"] if i + 1 < len(plan) else None
-                        raise _Stop
-                    break
-                if saved:
-                    _log_scene(log, sc, saved)
-                    logf.flush()
-                    done += 1
-            resume = None
-    except (_Stop, KeyboardInterrupt):
-        print(f"\n중단했습니다. 끝난 장면 {done}개는 저장돼 있습니다."
-              + (f" 이어서 하려면 --start {resume}" if resume else ""))
+                        while True:
+                            capture.check()
+                            if not args.yes:
+                                capture.mark("waiting", scene=sc["scene"], phase="prepare")
+                                ans = _ask_during_capture("  준비되면 Enter, 이 장면 건너뛰기 s, 끝내기 q: ", capture)
+                                capture.check()
+                                if ans == "q":
+                                    raise _Stop
+                                if ans == "s":
+                                    capture.mark("scene_skipped", scene=sc["scene"])
+                                    break
+                            saved = _record_scene(sers, sc["labels"], sc["seconds"], args.countdown, out, args.day,
+                                                  {"zone": "", "people": sc["people"], "notes": args.notes,
+                                                   "scene": sc["scene"], "description": sc["description"]}, capture)
+                            if args.yes:
+                                break
+                            capture.mark("waiting", scene=sc["scene"], phase="review")
+                            ans = _ask_during_capture("  Enter 다음 장면 / r 다시 찍기 / q 끝내기: ", capture)
+                            capture.check()
+                            if ans == "r":
+                                capture.discard_scene({n: path.stem for n, (path, _, _) in saved.items()}, reason="retry")
+                                for path, _, _ in saved.values():
+                                    path.unlink(missing_ok=True)
+                                    path.with_suffix(".json").unlink(missing_ok=True)
+                                saved = None
+                                print("  방금 장면 파일만 지웠습니다. 연속 원본은 남기고 다시 찍습니다.")
+                                continue
+                            if ans == "q":
+                                _log_scene(log, sc, saved)
+                                logf.flush()
+                                done += 1
+                                resume = plan[i + 1]["scene"] if i + 1 < len(plan) else None
+                                raise _Stop
+                            break
+                        if saved:
+                            _log_scene(log, sc, saved)
+                            logf.flush()
+                            done += 1
+                    resume = None
+            except _Stop:
+                stopped = True
+                capture.mark("command_stop", reason="q")
+            except KeyboardInterrupt:
+                capture.mark("command_stop", reason="keyboard_interrupt")
+                raise
+    except KeyboardInterrupt:
+        stopped = True
     finally:
         for ser in sers.values():
             ser.close()
+    if stopped:
+        print(f"\n중단했습니다. 끝난 장면 {done}개와 연속 원본은 남아 있습니다."
+              + (f" 이어서 하려면 --start {resume}" if resume else ""))
     if resume is None:
         print(f"\n장면 {done}개를 녹화했습니다.")
     print(f"기록: {log_path} (Notion 데이터 수집 일지에 옮겨 적습니다)")
@@ -1231,6 +1279,8 @@ def main(argv: list[str] | None = None) -> None:
         {"ports": cmd_ports, "check": cmd_check, "session": cmd_session, "record": cmd_record,
          "live": cmd_live, "send": cmd_send, "gateway": cmd_gateway, "compare": cmd_compare,
          "nodelog": cmd_nodelog}[args.cmd](args)
+    except RecordingError as exc:
+        sys.exit(f"원본 저장을 완료하지 못했습니다. 이 실행은 미완료로 확인하세요: {exc}")
     finally:
         _close_all_gateways()
         _GATEWAY.update(saved[0])
