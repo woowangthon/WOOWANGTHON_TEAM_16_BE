@@ -107,20 +107,22 @@ class StreamHub:
         return base
 
     @staticmethod
-    def restarted_since_baseline(db: Session, node_id: int) -> bool:
+    def restarted_since_baseline(db: Session, node_id: int, cutoff: datetime | None = None) -> bool:
         """지금 기준선을 만든 뒤 노드가 다시 켜졌는가.
 
         노드는 켜진 뒤 처음 패킷 100개로 이득(신호를 키우는 정도) 기준을 정한다. 다시 켜지면 그 기준이
         달라질 수 있어, 방이 그대로여도 신호 크기가 기준선과 어긋난다. 다시 보정하기 전까지는 판단하지 않는다.
+        cutoff가 있으면 그 시각까지의 재시작만 본다(종료된 상황의 판단 보존).
         """
         made = db.scalar(select(BaselineRow.created_at)
                          .where(BaselineRow.node_id == node_id, BaselineRow.active.is_(True))
                          .order_by(BaselineRow.id.desc()))
         if made is None:
             return False
-        last = db.scalar(select(Event.created_at)
-                         .where(Event.node_id == node_id, Event.kind == "node_restart")
-                         .order_by(Event.id.desc()))
+        restarts = select(Event.created_at).where(Event.node_id == node_id, Event.kind == "node_restart")
+        if cutoff is not None:
+            restarts = restarts.where(Event.created_at <= cutoff)
+        last = db.scalar(restarts.order_by(Event.id.desc()))
         return last is not None and as_aware(last) > as_aware(made)
 
     def _note_restart(self, db: Session, node: Node, calibrating: bool) -> None:

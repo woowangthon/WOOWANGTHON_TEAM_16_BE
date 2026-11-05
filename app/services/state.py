@@ -41,7 +41,10 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
     if ids:
         calibrated = set(db.scalars(select(BaselineRow.node_id).where(
             BaselineRow.node_id.in_(ids), BaselineRow.active.is_(True))).all())
-    restarted = {n.id for n in rx if n.id in calibrated and hub.restarted_since_baseline(db, n.id)}
+    # 종료 뒤 재시작은 당시의 마지막 판단을 바꾸지 않는다.
+    restart_cutoff = incident.ended_at if incident.status != "active" else None
+    restarted = {n.id for n in rx if n.id in calibrated
+                 and hub.restarted_since_baseline(db, n.id, cutoff=restart_cutoff)}
     out: dict[int, dict] = {}
     for n in rx:
         rows = list(reversed(db.scalars(
