@@ -1,8 +1,8 @@
-# 와치메이트 백엔드 (WOOWANGTHON_TEAM_XX_BE)
+# 와치메이트 백엔드 (WOOWANGTHON_TEAM_16_BE)
 
 화재 경보가 울리면 건물에 미리 설치한 Wi-Fi 노드(ESP32-S3)의 채널 상태 정보(CSI)를 받아,
 평면도 구역마다 사람 기척이 있는지 추정해 현장지휘관 화면에 보내는 서버입니다.
-2026 AI 우왕톤 팀 와치메이트의 출품작이며, 프론트엔드는 `WOOWANGTHON_TEAM_XX_FE` 저장소에 있습니다.
+2026 AI 우왕톤 16팀 와치메이트의 출품작이며, 프론트엔드는 [WOOWANGTHON_TEAM_16_FE](https://github.com/woowangthon/WOOWANGTHON_TEAM_16_FE) 저장소에 있습니다.
 
 - AI는 구역별 기척 확률과 근거를 2초마다 갱신하고 수색 우선순위를 제시합니다.
 - 진입 여부와 수색 순서는 지휘관이 정하고, 그 결정을 같은 화면에 기록합니다.
