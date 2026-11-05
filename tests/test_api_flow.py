@@ -168,3 +168,80 @@ def test_plan_upload_validates_type(client, auth):
     bad = client.put(f"/api/buildings/{bid}/plan", files={"file": ("p.txt", b"hello", "text/plain")},
                      data={"width": "800", "height": "600"}, headers=auth)
     assert bad.status_code == 415
+
+
+def test_low_frame_rate_is_not_read_as_person(client, auth):
+    """무선 손실로 프레임이 1/3만 오면 빈 방도 특징이 커진다. 감지로 띄우지 말고 '신호 부족'으로 보여야 한다."""
+    room = SyntheticRoom(seed=31)
+    b = client.post("/api/buildings", json={"name": "수신율 확인"}, headers=auth).json()
+    z = client.post(f"/api/buildings/{b['id']}/zones", json={"name": "A", "polygon": [[0, 0], [1, 0], [1, 1]]}, headers=auth).json()
+    rx = client.post(f"/api/buildings/{b['id']}/nodes", json={"name": "RX", "role": "rx", "x": 0.5, "y": 0.5, "zone_id": z["id"]}, headers=auth).json()
+    client.post(f"/api/buildings/{b['id']}/calibration/start", json={"duration_seconds": 120}, headers=auth)
+    _send(client, rx["token"], room.frames(40, "empty", seed=32))
+    client.post(f"/api/buildings/{b['id']}/calibration/stop", headers=auth)
+    incident_id = client.post("/api/alarm", json={"event": "fire"}, headers={"X-Alarm-Token": b["alarm_token"]}).json()["incident_id"]
+
+    _send(client, rx["token"], room.frames(24, "empty", fps=15, seed=33, t0=1_700_030_000.0))  # 보정 때의 30%
+    with SessionLocal() as db:
+        rows = db.query(Inference).filter(Inference.incident_id == incident_id).all()
+    assert rows and all(r.quality < 0.7 for r in rows)
+    state = client.get(f"/api/incidents/{incident_id}/state", headers=auth).json()
+    node = next(n for n in state["nodes"] if n["role"] == "rx")
+    assert node["status"] == "stale" and node["reason"] == "low_rate"
+    assert state["zones"][0]["state"] == "no_signal"
+    assert not any(e["kind"] == "first_detection" for e in state["timeline"])
+
+    # 다시 제대로 들어오면 판단을 이어 간다
+    _send(client, rx["token"], room.frames(24, "empty", seed=34, t0=1_700_030_030.0))
+    state = client.get(f"/api/incidents/{incident_id}/state", headers=auth).json()
+    assert state["zones"][0]["state"] == "not_detected"
+    client.post(f"/api/incidents/{incident_id}/close", headers=auth)
+
+
+def test_restarted_node_is_held_until_recalibrated(client, auth):
+    """보정한 뒤 노드가 다시 켜지면 신호 크기 기준이 어긋날 수 있다. 다시 보정할 때까지 그 구역은 '판단 불가'."""
+    room = SyntheticRoom(seed=41)
+    b = client.post("/api/buildings", json={"name": "재시작 확인"}, headers=auth).json()
+    bid = b["id"]
+    z = client.post(f"/api/buildings/{bid}/zones", json={"name": "A", "polygon": [[0, 0], [1, 0], [1, 1]]}, headers=auth).json()
+    rx = client.post(f"/api/buildings/{bid}/nodes", json={"name": "RX", "role": "rx", "x": 0.5, "y": 0.5, "zone_id": z["id"]}, headers=auth).json()
+
+    def send(frames, restarted=False):
+        body = {"frames": [{"t": t, "rssi": r, "data": raw} for t, r, raw in frames], "restarted": restarted}
+        res = client.post("/api/ingest/csi", json=body, headers={"X-Node-Token": rx["token"]})
+        assert res.status_code == 200, res.text
+        return res.json()
+
+    # 보정 중에 다시 켜지면 그 전까지 모은 신호는 버린다
+    client.post(f"/api/buildings/{bid}/calibration/start", json={"duration_seconds": 120}, headers=auth)
+    _send(client, rx["token"], room.frames(30, "empty", seed=42))
+    send(room.frames(1, "empty", seed=43, t0=1_700_040_000.0), restarted=True)
+    _send(client, rx["token"], room.frames(40, "empty", seed=44, t0=1_700_040_001.0))
+    done = client.post(f"/api/buildings/{bid}/calibration/stop", headers=auth).json()
+    node = next(n for n in done["nodes"] if n["role"] == "rx")
+    assert node["calibrated"] is True and node["restarted_since_calibration"] is False
+
+    # 화재 중에 다시 켜짐
+    incident_id = client.post("/api/alarm", json={"event": "fire"}, headers={"X-Alarm-Token": b["alarm_token"]}).json()["incident_id"]
+    _send(client, rx["token"], room.frames(10, "empty", seed=45, t0=1_700_050_000.0))
+    res = send(room.frames(1, "lying", seed=46, t0=1_700_050_010.0), restarted=True)
+    assert res.get("reason") == "restarted", res
+    assert _send(client, rx["token"], room.frames(10, "lying", seed=47, t0=1_700_050_011.0))["reason"] == "restarted"
+    state = client.get(f"/api/incidents/{incident_id}/state", headers=auth).json()
+    rx_state = next(n for n in state["nodes"] if n["role"] == "rx")
+    assert rx_state["status"] == "stale" and rx_state["reason"] == "restarted"
+    assert state["zones"][0]["state"] == "no_signal"  # '감지 안 됨'보다 위: 지휘관이 직접 확인할 구역
+    assert any(e["kind"] == "node_restart" for e in state["timeline"])
+    assert not any(e["kind"] == "first_detection" for e in state["timeline"])
+    client.post(f"/api/incidents/{incident_id}/close", headers=auth)
+
+    detail = client.get(f"/api/buildings/{bid}", headers=auth).json()
+    node = next(n for n in detail["nodes"] if n["role"] == "rx")
+    assert node["calibrated"] is False and node["restarted_since_calibration"] is True
+
+    # 다시 보정하면 풀린다
+    client.post(f"/api/buildings/{bid}/calibration/start", json={"duration_seconds": 120}, headers=auth)
+    _send(client, rx["token"], room.frames(40, "empty", seed=48, t0=1_700_060_000.0))
+    done = client.post(f"/api/buildings/{bid}/calibration/stop", headers=auth).json()
+    node = next(n for n in done["nodes"] if n["role"] == "rx")
+    assert node["calibrated"] is True and node["restarted_since_calibration"] is False

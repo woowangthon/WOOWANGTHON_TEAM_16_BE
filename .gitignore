@@ -5,7 +5,14 @@ __pycache__/
 venv/
 .env
 data/
+_raw/
 sample_data/_dev_synthetic/
 *.db
 *.db-wal
 *.db-shm
+# ESP-IDF 빌드 결과(firmware/)
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/managed_components/
+firmware/**/dependencies.lock

@@ -36,7 +36,8 @@ def zone_out(z: Zone) -> dict:
     return {"id": z.id, "name": z.name, "polygon": z.polygon}
 
 
-def node_out(n: Node, *, calibrated: bool | None = None) -> dict:
+def node_out(n: Node, *, calibrated: bool | None = None, restarted: bool = False) -> dict:
+    """restarted: 보정한 뒤 다시 켜져서 기준선을 믿을 수 없음(calibrated도 False로 내보낸다)."""
     return {
         "id": n.id,
         "name": n.name,
@@ -47,7 +48,8 @@ def node_out(n: Node, *, calibrated: bool | None = None) -> dict:
         "has_token": n.token_hash is not None,
         "last_seen_at": iso(n.last_seen_at),
         "last_rssi": n.last_rssi,
-        "calibrated": calibrated,
+        "calibrated": False if restarted else calibrated,
+        "restarted_since_calibration": restarted,
     }
 
 

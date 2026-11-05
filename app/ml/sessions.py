@@ -76,6 +76,9 @@ def load_sessions(data_dir: str | Path) -> tuple[list[Session], list[str]]:
     sessions: list[Session] = []
     problems: list[str] = []
     for meta_path in sorted(data_dir.rglob("*.json")):
+        # 준비·재촬영까지 보관한 원본에는 장면 라벨을 붙이지 않는다.
+        if "_raw" in meta_path.relative_to(data_dir).parts:
+            continue
         csv_path = meta_path.with_suffix(".csv")
         if not csv_path.exists():
             continue

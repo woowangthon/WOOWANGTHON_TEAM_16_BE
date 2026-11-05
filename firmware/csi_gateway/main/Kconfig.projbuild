@@ -1,0 +1,20 @@
+menu "Watchmate gateway"
+
+    config WM_GW_BAUD
+        int "노트북으로 보내는 USB(UART) 속도"
+        default 2000000
+        help
+            CH343 시리얼 칩은 6Mbps까지 된다. 노드 3개 × 초당 약 70건 × 약 430바이트 ≈ 초당 90KB라서
+            2Mbps(초당 약 200KB)면 남는다. tools/collector.py의 --gateway-baud와 같아야 한다.
+
+    config WM_GW_RINGBUF_KB
+        int "USB로 보내기 전 쌓아 두는 버퍼(KB)"
+        range 8 128
+        default 48
+
+    config WM_GW_UART_TX_KB
+        int "UART 드라이버 송신 버퍼(KB)"
+        range 4 64
+        default 16
+
+endmenu

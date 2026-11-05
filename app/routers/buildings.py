@@ -49,7 +49,9 @@ def _building_detail(db: Session, b: Building) -> dict:
     out = building_out(b, zones=len(zones), nodes=len(nodes),
                        active_incident_id=incident.id if incident else None)
     out["zones"] = [zone_out(z) for z in zones]
-    out["nodes"] = [node_out(n, calibrated=(n.id in calibrated) if n.role == "rx" else None) for n in nodes]
+    out["nodes"] = [node_out(n, calibrated=(n.id in calibrated) if n.role == "rx" else None,
+                             restarted=n.id in calibrated and hub.restarted_since_baseline(db, n.id))
+                    for n in nodes]
     out["calibration"] = calibration_out(run, progress)
     out["active_incident"] = incident_out(incident) if incident else None
     return out

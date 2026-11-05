@@ -10,12 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..ml.features import evidence_from_z
+from ..ml.features import MIN_WINDOW_QUALITY, evidence_from_z
 from ..models import Baseline as BaselineRow
 from ..models import Building, Decision, Event, Incident, Inference, Node, Zone, utcnow
 from ..serializers import incident_out, iso
 from .registry import registry
-from .stream import DETECT_P, POSSIBLE_P, as_aware
+from .stream import DETECT_P, POSSIBLE_P, as_aware, hub
 
 EMA_ALPHA = 0.5
 RECENT_ROWS = 12
@@ -41,6 +41,10 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
     if ids:
         calibrated = set(db.scalars(select(BaselineRow.node_id).where(
             BaselineRow.node_id.in_(ids), BaselineRow.active.is_(True))).all())
+    # 종료 뒤 재시작은 당시의 마지막 판단을 바꾸지 않는다.
+    restart_cutoff = incident.ended_at if incident.status != "active" else None
+    restarted = {n.id for n in rx if n.id in calibrated
+                 and hub.restarted_since_baseline(db, n.id, cutoff=restart_cutoff)}
     out: dict[int, dict] = {}
     for n in rx:
         rows = list(reversed(db.scalars(
@@ -49,24 +53,34 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
             .order_by(Inference.id.desc())
             .limit(RECENT_ROWS)
         ).all()))
+        # 프레임이 모자란 창은 특징이 사람 없이도 커질 수 있으므로 확률 계산에 넣지 않는다
+        good = [r for r in rows if r.quality is None or r.quality >= MIN_WINDOW_QUALITY]
+        low_rate = bool(rows) and rows[-1].quality is not None and rows[-1].quality < MIN_WINDOW_QUALITY
         ema = None
-        for r in rows:
+        for r in good:
             p = r.p_person if r.p_person is not None else r.p_change
             ema = p if ema is None else EMA_ALPHA * p + (1 - EMA_ALPHA) * ema
         age = None
         if n.last_seen_at is not None:
             age = (now - as_aware(n.last_seen_at)).total_seconds()
+        reason = None
         if n.id not in calibrated:
             status = "uncalibrated"
-        elif freeze and rows:
+        elif n.id in restarted:
+            status, reason = "stale", "restarted"  # 신호는 오지만 기준선과 크기 기준이 어긋났을 수 있음
+        elif freeze and good:
             status = "ok"
         elif age is None or age > settings.stale_seconds:
             status = "stale"
         elif not rows:
             status = "warming"
+        elif low_rate:
+            status, reason = "stale", "low_rate"  # 신호는 오지만 프레임이 모자라 판단할 수 없음
+        elif not good:
+            status = "warming"
         else:
             status = "ok"
-        last = rows[-1] if rows else None
+        last = good[-1] if good else None
         out[n.id] = {
             "id": n.id,
             "name": n.name,
@@ -75,10 +89,11 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
             "x": n.x,
             "y": n.y,
             "status": status,
+            "reason": reason,
             "p": None if ema is None else round(ema, 3),
-            "windows": len(rows),
+            "windows": len(good),
             "last_seen_s": None if age is None else round(age, 1),
-            "quality": None if last is None else last.quality,
+            "quality": rows[-1].quality if rows else None,
             "evidence": [] if last is None else evidence_from_z(last.z),
             "source": None if last is None else last.source,
         }

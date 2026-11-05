@@ -1,3 +1,6 @@
 ﻿scene,description,people,seconds,RX-301,RX-302,RX-COR
 start_empty,모두 방과 복도 밖으로 나간다(시험용 기준선),0,40,empty,empty,empty
-lying_301,301호에 1명이 바닥에 눕는다(시험),1,40,lying,neighbor,neighbor
+walking_301,223호 안을 1명이 천천히 걸어 다닌다(보드 자리 점검),1,40,walking,neighbor,neighbor
+walking_302,224호 안을 1명이 천천히 걸어 다닌다(보드 자리 점검),1,40,neighbor,walking,neighbor
+walking_cor,복도를 1명이 천천히 왕복한다(보드 자리 점검),1,40,neighbor,neighbor,walking
+lying_301,223호에 1명이 바닥에 눕는다(시험),1,40,lying,neighbor,neighbor

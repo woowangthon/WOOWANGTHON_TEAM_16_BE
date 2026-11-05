@@ -1,0 +1,28 @@
+menu "Watchmate CSI node"
+
+    config WM_UART_ALWAYS
+        bool "게이트웨이로 보내면서 USB로도 늘 CSI_DATA 줄을 찍는다"
+        default y
+        help
+            켜 두면 USB 케이블만 꽂으면 바로 기존 collector.py check/session이 된다(게이트웨이를 끌 필요 없음).
+            USB 출력은 무선 전송보다 우선순위가 낮은 별도 태스크가 하고, 못 따라가면 USB 줄만 건너뛴다.
+            그래서 무선의 초당 측정 수는 USB 출력 속도(약 60~70줄)에 묶이지 않는다.
+
+    config WM_UART_FALLBACK
+        bool "(WM_UART_ALWAYS를 끈 경우) 게이트웨이가 없을 때만 USB로 찍는다"
+        depends on !WM_UART_ALWAYS
+        default y
+
+    config WM_QUEUE_LEN
+        int "게이트웨이로 보내기 전 쌓아 두는 CSI 개수"
+        range 4 64
+        default 24
+
+    config WM_UPLINK_RATE
+        hex "게이트웨이로 보낼 때 HT40 전송 속도(wifi_phy_rate_t 값)"
+        default 0x12
+        help
+            0x10 MCS0, 0x11 MCS1, 0x12 MCS2(기본), 0x13 MCS3, 0x14 MCS4 (모두 long GI).
+            게이트웨이가 멀어서 실패가 많으면 낮추고, 가까우면 높여 전파 점유를 줄인다.
+
+endmenu
