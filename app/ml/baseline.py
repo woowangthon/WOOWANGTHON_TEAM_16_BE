@@ -18,6 +18,12 @@ from .features import FEATURE_NAMES, N_FEATURES, context_slice, iter_windows, wi
 
 MIN_BASELINE_WINDOWS = 8
 Z_CLIP = (-5.0, 25.0)
+# 특징별 척도 하한. RSSI는 1 dB 단위 정수라 보정 내내 같은 값이면 MAD가 0이 되고 척도가 0.001 dB까지 내려간다.
+# 그러면 2초 창(100~170프레임)에서 한 프레임만 1 dB 깜빡여도 z가 6~10으로 튀어, 문턱이 6~9로 오르고
+# 빈 방에서도 점수가 2씩 튄다(11/7 RX-301·RX-COR). 0.05 dB면 한 프레임 깜빡임은 z 0.1~0.2이고,
+# 창 전체가 1 dB 바뀌면 z 20이라 사람이 길을 가리는 변화는 그대로 잡힌다.
+RSSI_SCALE_FLOOR_DB = 0.05
+_SCALE_FLOOR = np.array([RSSI_SCALE_FLOOR_DB if name == "rssi_shift" else 0.0 for name in FEATURE_NAMES])
 
 
 class BaselineError(ValueError):
@@ -42,7 +48,8 @@ class Baseline:
 
     def zscore(self, f: np.ndarray) -> np.ndarray:
         eps = 1e-3 + 0.05 * np.abs(np.nan_to_num(self.med))
-        z = (f - self.med) / (1.4826 * np.nan_to_num(self.mad) + eps)
+        scale = np.maximum(1.4826 * np.nan_to_num(self.mad) + eps, _SCALE_FLOOR)
+        z = (f - self.med) / scale
         z = np.where(np.isfinite(z), z, 0.0)
         return np.clip(z, *Z_CLIP)
 

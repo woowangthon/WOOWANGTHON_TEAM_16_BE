@@ -69,6 +69,8 @@ class StreamHub:
         self._calib: dict[int, list[Frame]] = {}
         self._baseline_cache: dict[int, tuple[int, Baseline]] = {}
         self._first_detect_seen: set[tuple[int, int]] = set()
+        # 마무리한 보정 id. 같은 보정을 두 요청이 차례로 마무리하면 두 번째가 빈 프레임으로 결과를 덮어썼다(11/7).
+        self._finished_calibrations: set[int] = set()
 
     # ---- 조회 도우미 -------------------------------------------------
     @staticmethod
@@ -301,7 +303,10 @@ class StreamHub:
 
     def finish_calibration(self, db: Session, run: CalibrationRun) -> CalibrationRun:
         with self._lock:
-            if run.status != "running":
+            # 잠금을 기다리는 동안 다른 요청(수집기 전송·건물 조회·보정 끝내기)이 이미 마무리했을 수 있다.
+            # 그 요청이 들고 온 run은 '진행 중'으로 낡아 있으니 DB에서 다시 읽고, 마무리한 id도 함께 본다.
+            db.refresh(run)
+            if run.status != "running" or run.id in self._finished_calibrations:
                 return run
             nodes = db.scalars(select(Node).where(Node.building_id == run.building_id, Node.role == "rx")).all()
             results: dict[str, dict] = {}
@@ -331,6 +336,7 @@ class StreamHub:
             db.add(Event(building_id=run.building_id, kind="calibration",
                          message=f"기준선 보정 {'완료' if ok else '실패'}: 노드 {ok}/{len(nodes)}개"))
             db.commit()
+            self._finished_calibrations.add(run.id)
             return run
 
     def store_baseline(self, db: Session, node: Node, base: Baseline) -> BaselineRow:
