@@ -1,0 +1,14 @@
+scene,description,people,seconds,RX-301,RX-302,RX-COR
+start_empty,[예정 0:00] 모두 대기 장소 · 3분 동안 아무도 움직이지 않음,0,180,empty,empty,empty
+standing_301,[예정 3:20] 223호 의자 옆 1m 테이프 자리에 가만히 서 있음,1,60,standing,neighbor,neighbor
+sitting_301,[예정 4:40] 223호 테이프 자리 의자에 앉아 있음 (의자 옮기지 않기),1,60,sitting,neighbor,neighbor
+lying_301,[예정 6:00] 223호 의자 옆 1m 테이프 자리 바닥에 누워 숨만 쉼 (2분),1,120,lying,neighbor,neighbor
+empty_mid1,[예정 8:20] 연기자가 223호에서 나와 대기 장소로 · 의자 손대지 않기,0,180,empty,empty,empty
+standing_302,[예정 11:40] 224호 의자 옆 1m 테이프 자리에 가만히 서 있음,1,60,neighbor,standing,neighbor
+sitting_302,[예정 13:00] 224호 테이프 자리 의자에 앉아 있음 (의자 옮기지 않기),1,60,neighbor,sitting,neighbor
+lying_302,[예정 14:20] 224호 의자 옆 1m 테이프 자리 바닥에 누워 숨만 쉼 (2분),1,120,neighbor,lying,neighbor
+empty_mid2,[예정 16:40] 연기자가 224호에서 나와 대기 장소로 · 의자 손대지 않기,0,180,empty,empty,empty
+standing_cor,[예정 20:00] 복도 RX-COR 근처 테이프 자리에 가만히 서 있음,1,60,neighbor,neighbor,standing
+sitting_cor,[예정 21:20] 복도 같은 자리 바닥에 벽에 기대 앉음,1,60,neighbor,neighbor,sitting
+lying_cor,[예정 22:40] 복도 같은 자리 바닥에 누워 숨만 쉼 (2분),1,120,neighbor,neighbor,lying
+end_empty,[예정 25:00] 연기자가 복도에서 나와 대기 장소로,0,180,empty,empty,empty

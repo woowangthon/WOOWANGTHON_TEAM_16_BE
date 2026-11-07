@@ -1,0 +1,5 @@
+﻿folder,round,day,scenes,nodes,expected_files,reason
+excluded/2026-11-07,1차,2026-11-07,standing_302;sitting_302;lying_302,RX-302,6,RX-302 받침 높이가 달라 수신 불안정(20~74Hz). 224호 장면은 1차 보완(07b)으로 대체
+excluded/2026-11-07d,3차 중단 1,2026-11-07d,start_empty;standing_301,,12,보정이 끝날 때 서버가 멈춰 화면이 따라오지 않아 장면 2개 뒤 녹화 중단
+excluded/2026-11-07e-first,3차 중단 2,2026-11-07e,start_empty;standing_301,,12,"18:53 시작, 장면 2개 뒤 멈추고 18:59에 같은 폴더로 다시 시작. 첫 시도 standing_301은 변화 점수 0.2로 사람이 자리에 없었던 것으로 보임"
+excluded/2026-11-07f-corridor,4차,2026-11-07f,empty_mid1;lying_302;empty_mid2;end_empty,RX-301;RX-COR,16,복도로 사람이 지나감(5·8·9번) 또는 약 40초 머묾(13번). 라벨(빈 방·옆 구역)과 실제가 다름. RX-302는 복도 사람에 반응하지 않아 유지

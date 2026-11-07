@@ -1,0 +1,6 @@
+scene,description,people,seconds,RX-301,RX-302,RX-COR
+start_empty,[예정 0:00] 모두 대기 장소 · 아무도 움직이지 않음,0,120,empty,empty,empty
+standing_302,[예정 2:20] 1명이 224호 가운데에 가만히 서 있음,1,120,neighbor,standing,neighbor
+sitting_302,[예정 4:40] 224호 같은 자리 의자에 앉아 있음,1,120,neighbor,sitting,neighbor
+lying_302,[예정 7:00] 224호 같은 자리 바닥에 누워 숨만 쉼,1,120,neighbor,lying,neighbor
+end_empty,[예정 9:20] 연기자가 224호에서 나와 대기 장소로,0,120,empty,empty,empty
