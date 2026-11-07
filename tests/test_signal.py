@@ -59,6 +59,29 @@ def test_too_short_calibration_is_rejected():
         fit_baseline(t, rssi, amp)
 
 
+def test_constant_rssi_calibration_ignores_one_frame_blips():
+    """보정 내내 RSSI가 한 값이라 MAD가 0이어도, 한두 프레임 1 dB 깜빡임에 문턱과 점수가 튀면 안 된다(11/7 RX-301·RX-COR)."""
+    room = SyntheticRoom(seed=7)
+    rng = np.random.default_rng(0)
+    t, rssi, amp = _arrays(room.frames(40, "empty", seed=3))
+    rssi = np.where(rng.random(rssi.size) < 0.003, -44.0, -43.0)  # 대부분 -43 dBm, 가끔 한 프레임만 -44
+    base = fit_baseline(t, rssi, amp)
+    i = FEATURE_NAMES.index("rssi_shift")
+    assert base.mad[i] == 0.0
+    assert base.tau < 3.0
+
+    t2, _, amp2 = _arrays(room.frames(4, "empty", seed=4, t0=1_700_003_000.0))
+    rssi2 = np.full(t2.size, -43.0)
+    i0, i1, te = next(iter(iter_windows(t2, 2.0)))
+    c0, c1 = context_slice(t2, te, 16.0)
+    rssi2[i0] = -44.0  # 빈 방, 한 프레임 깜빡임
+    z = base.zscore(base.features(amp2[i0:i1], rssi2[i0:i1], amp2[c0:c1], t2[c0:c1]))
+    assert z[i] < 1.0
+    rssi2[i0:i1] = -44.0  # 창 전체가 1 dB 바뀜(사람이 길을 가림)
+    z = base.zscore(base.features(amp2[i0:i1], rssi2[i0:i1], amp2[c0:c1], t2[c0:c1]))
+    assert z[i] >= 10.0
+
+
 def test_zscore_handles_nan_and_clips(room_and_base):
     _, base = room_and_base
     f = np.full(len(FEATURE_NAMES), np.nan)

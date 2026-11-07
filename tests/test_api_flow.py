@@ -157,6 +157,36 @@ def test_calibration_finishes_on_read_with_consistent_flags(client, auth):
     assert detail["nodes"][0]["calibrated"] is True
 
 
+def test_second_finish_does_not_overwrite_calibration(client, auth):
+    """보정 시간이 지난 뒤 두 요청이 같은 '진행 중' 기록을 들고 차례로 마무리해도, 두 번째가 빈 프레임으로 결과를 덮어쓰면 안 된다(11/7)."""
+    from datetime import datetime, timedelta, timezone
+    from app.models import CalibrationRun
+    from app.services.stream import hub
+
+    bid = client.post("/api/buildings", json={"name": "보정 마무리 겹침"}, headers=auth).json()["id"]
+    z = client.post(f"/api/buildings/{bid}/zones", json={"name": "A", "polygon": [[0, 0], [1, 0], [1, 1]]}, headers=auth).json()
+    rx = client.post(f"/api/buildings/{bid}/nodes", json={"name": "RX", "role": "rx", "x": 0.5, "y": 0.5, "zone_id": z["id"]}, headers=auth).json()
+    client.post(f"/api/buildings/{bid}/calibration/start", json={"duration_seconds": 60}, headers=auth)
+    _send(client, rx["token"], SyntheticRoom(seed=23).frames(40, "empty", seed=23))
+    with SessionLocal() as db:
+        run = db.query(CalibrationRun).filter(CalibrationRun.building_id == bid).one()
+        run.ends_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+
+    with SessionLocal() as db_a, SessionLocal() as db_b:
+        run_a = db_a.query(CalibrationRun).filter(CalibrationRun.building_id == bid).one()
+        run_b = db_b.query(CalibrationRun).filter(CalibrationRun.building_id == bid).one()
+        assert run_a.status == run_b.status == "running"
+        hub.finish_calibration(db_a, run_a)  # 먼저 마무리(기준선 저장)
+        again = hub.finish_calibration(db_b, run_b)  # 낡은 기록을 들고 기다리던 요청
+        assert again.status == "done"
+
+    detail = client.get(f"/api/buildings/{bid}", headers=auth).json()
+    assert detail["calibration"]["status"] == "done"
+    assert all(r["ok"] for r in detail["calibration"]["result"].values())
+    assert detail["nodes"][0]["calibrated"] is True
+
+
 def test_plan_upload_validates_type(client, auth):
     bid = client.post("/api/buildings", json={"name": "평면도"}, headers=auth).json()["id"]
     png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
