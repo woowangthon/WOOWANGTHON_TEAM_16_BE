@@ -1,6 +1,6 @@
 # 노드 이름표와 MAC. 노드에 csi_node를 올릴 때 나온 "노드 MAC"(또는 esptool의 "MAC:")을 적는다.
 # 명령에서 gw:RX-301 이나 --node RX-301=gw 로 쓰면 이 파일에서 MAC을 찾는다. 같은 MAC을 두 번 적으면 멈춘다.
 node,mac
-RX-301,
-RX-302,
-RX-COR,
+RX-301,90:70:69:f7:ec:bc
+RX-302,90:70:69:f7:75:dc
+RX-COR,90:70:69:f8:05:ec
