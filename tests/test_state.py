@@ -9,6 +9,19 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.models import Baseline, Building, Event, Incident, Inference, Node, utcnow
 from app.services.state import _node_infos, _zone_state
+from app.services.stream import detection_thresholds, smoothed_probability
+
+
+def test_measurement_thresholds_and_low_quality_windows():
+    assert detection_thresholds("measurement", False) == (0.50, 0.20)
+    assert detection_thresholds("measurement", True) == (0.70, 0.35)
+    assert detection_thresholds("alarm", False) == (0.70, 0.35)
+    rows = [Inference(p_change=p, quality=q) for p, q in ((0.2, 1), (1, 0.3), (0.8, 1))]
+    score = smoothed_probability(rows)
+    assert score == 0.5
+    info = dict(status="ok", p=score, evidence=[], windows=3)
+    assert _zone_state([info], "measurement")[0] == "detected"
+    assert _zone_state([info], "alarm")[0] == "possible"
 
 
 @pytest.mark.parametrize("restart_after_close", [True, False])

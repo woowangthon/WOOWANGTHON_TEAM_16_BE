@@ -34,7 +34,7 @@ def _incident_or_404(db: Session, incident_id: int) -> Incident:
 @router.post("/buildings/{building_id}/incidents", status_code=201)
 def open_manual(building_id: int, body: IncidentIn, db: Session = Depends(get_db), _: User = Depends(current_user)):
     b = get_building_or_404(db, building_id)
-    incident, created = open_incident(db, b, "manual", body.note.strip())
+    incident, created = open_incident(db, b, "measurement" if body.measurement else "manual", body.note.strip())
     out = incident_out(incident)
     out["created"] = created
     return out

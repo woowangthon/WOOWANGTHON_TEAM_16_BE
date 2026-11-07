@@ -12,13 +12,11 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..ml.features import MIN_WINDOW_QUALITY, evidence_from_z
 from ..models import Baseline as BaselineRow
-from ..models import Building, Decision, Event, Incident, Inference, Node, Zone, utcnow
+from ..models import Building, Decision, Event, Incident, Node, Zone, utcnow
 from ..serializers import incident_out, iso
 from .registry import registry
-from .stream import DETECT_P, POSSIBLE_P, as_aware, hub
+from .stream import as_aware, detection_thresholds, hub, recent_probabilities, smoothed_probability
 
-EMA_ALPHA = 0.5
-RECENT_ROWS = 12
 MIN_WINDOWS_FOR_NOT_DETECTED = 3
 
 STATE_RANK = {
@@ -47,19 +45,11 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
                  and hub.restarted_since_baseline(db, n.id, cutoff=restart_cutoff)}
     out: dict[int, dict] = {}
     for n in rx:
-        rows = list(reversed(db.scalars(
-            select(Inference)
-            .where(Inference.incident_id == incident.id, Inference.node_id == n.id)
-            .order_by(Inference.id.desc())
-            .limit(RECENT_ROWS)
-        ).all()))
+        rows = recent_probabilities(db, incident.id, n.id)
         # 프레임이 모자란 창은 특징이 사람 없이도 커질 수 있으므로 확률 계산에 넣지 않는다
         good = [r for r in rows if r.quality is None or r.quality >= MIN_WINDOW_QUALITY]
         low_rate = bool(rows) and rows[-1].quality is not None and rows[-1].quality < MIN_WINDOW_QUALITY
-        ema = None
-        for r in good:
-            p = r.p_person if r.p_person is not None else r.p_change
-            ema = p if ema is None else EMA_ALPHA * p + (1 - EMA_ALPHA) * ema
+        ema = smoothed_probability(rows)
         age = None
         if n.last_seen_at is not None:
             age = (now - as_aware(n.last_seen_at)).total_seconds()
@@ -100,16 +90,17 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
     return out
 
 
-def _zone_state(infos: list[dict]) -> tuple[str, float | None, list[str], bool]:
+def _zone_state(infos: list[dict], source: str = "manual") -> tuple[str, float | None, list[str], bool]:
     if not infos:
         return "no_sensor", None, [], False
     ok = [i for i in infos if i["status"] == "ok" and i["p"] is not None]
     if ok:
         best = max(ok, key=lambda i: i["p"])
         p = best["p"]
-        if p >= DETECT_P:
+        detect, possible = detection_thresholds(source, registry.model is not None)
+        if p >= detect:
             state = "detected"
-        elif p >= POSSIBLE_P:
+        elif p >= possible:
             state = "possible"
         elif max(i["windows"] for i in ok) >= MIN_WINDOWS_FOR_NOT_DETECTED:
             state = "not_detected"
@@ -149,7 +140,7 @@ def incident_state(db: Session, incident: Incident) -> dict:
     zone_rows = []
     for z in zones:
         zinfos = [infos[n.id] for n in rx if n.zone_id == z.id]
-        state, p, evidence, partial = _zone_state(zinfos)
+        state, p, evidence, partial = _zone_state(zinfos, incident.source)
         d = latest.get(z.id)
         zone_rows.append({
             "id": z.id,
@@ -208,6 +199,7 @@ def incident_state(db: Session, incident: Incident) -> dict:
             "is_demo": building.is_demo,
         },
         "mode": registry.mode,
+        "thresholds": dict(zip(("detected", "possible"), detection_thresholds(incident.source, registry.model is not None))),
         "model_version": registry.model.version if registry.model else None,
         "server_time": iso(utcnow()),
         "zones": zone_rows,

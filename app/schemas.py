@@ -94,6 +94,7 @@ class AlarmIn(BaseModel):
 
 
 class IncidentIn(BaseModel):
+    measurement: bool = False
     note: str = Field("", max_length=300)
 
 

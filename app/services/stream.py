@@ -29,8 +29,28 @@ from .registry import registry
 
 log = logging.getLogger("watchmate")
 
-DETECT_P = 0.70
-POSSIBLE_P = 0.35
+RECENT_ROWS = 12
+
+
+def detection_thresholds(source: str, person_mode: bool) -> tuple[float, float]:
+    return (0.50, 0.20) if source == "measurement" and not person_mode else (0.70, 0.35)
+
+
+def recent_probabilities(db, incident_id, node_id):
+    rows = db.scalars(select(Inference).where(Inference.incident_id == incident_id,
+                      Inference.node_id == node_id).order_by(Inference.id.desc()).limit(RECENT_ROWS)).all()
+    return list(reversed(rows))
+
+
+def smoothed_probability(rows):
+    result = None
+    for row in rows:
+        if row.quality is not None and row.quality < MIN_WINDOW_QUALITY:
+            continue
+        p = row.p_person if row.p_person is not None else row.p_change
+        result = p if result is None else (p + result) / 2
+    return None if result is None else round(result, 3)
+
 CALIB_MAX_SECONDS = 660.0
 MAX_CATCH_UP_SECONDS = 600.0
 
@@ -216,6 +236,8 @@ class StreamHub:
         offset = now.timestamp() - last_t
         model = registry.model
         made = 0
+        recent = None
+        detect_p, _ = detection_thresholds(incident.source, model is not None)
         while buf.next_end <= last_t:
             end = buf.next_end
             buf.next_end += w
@@ -230,7 +252,7 @@ class StreamHub:
             p_change = base.p_change(score)
             p_person = model.predict(z) if model is not None else None
             quality = window_quality(i1 - i0, base.fps, w)
-            db.add(Inference(
+            row = Inference(
                 incident_id=incident.id,
                 node_id=node.id,
                 zone_id=node.zone_id,
@@ -241,13 +263,18 @@ class StreamHub:
                 z={k: round(float(v), 3) for k, v in zip(FEATURE_NAMES, z)},
                 quality=round(quality, 3),
                 source=source,
-            ))
+            )
+            if node.zone_id is not None and (incident.id, node.zone_id) not in self._first_detect_seen:
+                p = p_person if p_person is not None else p_change
+                if incident.source == "measurement":
+                    if recent is None:
+                        recent = deque(recent_probabilities(db, incident.id, node.id), maxlen=RECENT_ROWS)
+                    recent.append(row)
+                    p = smoothed_probability(recent)
+                if quality >= MIN_WINDOW_QUALITY and p is not None and p >= detect_p:
+                    self._note_first_detection(db, incident, node, p, model is not None)
+            db.add(row)
             made += 1
-            if quality < MIN_WINDOW_QUALITY:
-                continue  # 프레임이 모자란 창은 저장만 하고 판단(첫 감지 알림, 구역 상태)에 쓰지 않는다
-            p_used = p_person if p_person is not None else p_change
-            if p_used >= DETECT_P and node.zone_id is not None:
-                self._note_first_detection(db, incident, node, p_used, model is not None)
 
         keep_from = (buf.next_end or last_t) - w - c
         while buf.t and buf.t[0] < keep_from:

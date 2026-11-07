@@ -130,7 +130,7 @@ class Incident(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     building_id: Mapped[int] = mapped_column(ForeignKey("buildings.id", ondelete="CASCADE"), index=True)
-    source: Mapped[str] = mapped_column(String(16))  # alarm | manual | replay
+    source: Mapped[str] = mapped_column(String(16))  # alarm | manual | measurement | replay
     status: Mapped[str] = mapped_column(String(16), default="active")  # active | closed
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

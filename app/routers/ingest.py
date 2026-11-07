@@ -45,7 +45,7 @@ def open_incident(db: Session, building: Building, source: str, note: str) -> tu
     incident = Incident(building_id=building.id, source=source, note=note)
     db.add(incident)
     db.flush()
-    label = {"alarm": "화재 경보 수신", "manual": "지휘관 수동 개시", "replay": "녹화 데이터 재생 시작"}.get(source, source)
+    label = {"alarm": "화재 경보 수신", "manual": "지휘관 수동 개시", "measurement": "현장 실측", "replay": "녹화 데이터 재생 시작"}.get(source, source)
     db.add(Event(building_id=building.id, incident_id=incident.id, kind="incident_open",
                  message=f"{label} — 감지를 시작합니다." + (f" ({note})" if note else "")))
     db.commit()
