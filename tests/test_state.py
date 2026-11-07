@@ -15,7 +15,10 @@ from app.services.stream import detection_thresholds, smoothed_probability
 def test_measurement_thresholds_and_low_quality_windows():
     assert detection_thresholds("measurement", False) == (0.50, 0.20)
     assert detection_thresholds("measurement", True) == (0.70, 0.35)
+    assert detection_thresholds("replay", False) == (0.50, 0.20)  # 녹화 재생도 실측과 같은 기준
+    assert detection_thresholds("replay", True) == (0.70, 0.35)
     assert detection_thresholds("alarm", False) == (0.70, 0.35)
+    assert detection_thresholds("manual", False) == (0.70, 0.35)
     rows = [Inference(p_change=p, quality=q) for p, q in ((0.2, 1), (1, 0.3), (0.8, 1))]
     score = smoothed_probability(rows)
     assert score == 0.5

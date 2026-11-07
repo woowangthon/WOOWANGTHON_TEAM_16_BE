@@ -32,8 +32,13 @@ log = logging.getLogger("watchmate")
 RECENT_ROWS = 12
 
 
+# 현장 실측과, 그렇게 녹화한 데이터를 다시 재생할 때는 실측 화면과 같은 1단계 기준을 쓴다.
+# 재생만 기본 기준(0.70)으로 보면 같은 녹화가 측정 기록보다 덜 감지된 것처럼 보인다.
+MEASURED_SOURCES = frozenset({"measurement", "replay"})
+
+
 def detection_thresholds(source: str, person_mode: bool) -> tuple[float, float]:
-    return (0.50, 0.20) if source == "measurement" and not person_mode else (0.70, 0.35)
+    return (0.50, 0.20) if source in MEASURED_SOURCES and not person_mode else (0.70, 0.35)
 
 
 def recent_probabilities(db, incident_id, node_id):
@@ -266,7 +271,7 @@ class StreamHub:
             )
             if node.zone_id is not None and (incident.id, node.zone_id) not in self._first_detect_seen:
                 p = p_person if p_person is not None else p_change
-                if incident.source == "measurement":
+                if incident.source in MEASURED_SOURCES:
                     if recent is None:
                         recent = deque(recent_probabilities(db, incident.id, node.id), maxlen=RECENT_ROWS)
                     recent.append(row)
