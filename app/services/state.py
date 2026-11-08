@@ -15,7 +15,8 @@ from ..models import Baseline as BaselineRow
 from ..models import Building, Decision, Event, Incident, Node, Zone, utcnow
 from ..serializers import incident_out, iso
 from .registry import registry
-from .stream import as_aware, detection_thresholds, hub, recent_probabilities, smoothed_probability
+from .detection import detection_thresholds, smoothed_probability, threshold_dict
+from .stream import as_aware, detection_started_at, hub, recent_probabilities
 
 MIN_WINDOWS_FOR_NOT_DETECTED = 3
 
@@ -134,10 +135,13 @@ def incident_state(db: Session, incident: Incident) -> dict:
     for d in decisions:
         if d.action != "note":
             latest[d.zone_id] = d
+    first_query = select(Event).where(Event.incident_id == incident.id, Event.kind == "first_detection")
+    since = detection_started_at(db, incident.id)
+    if since is not None:
+        first_query = first_query.where(Event.created_at >= since)
     first_detect = {
         e.zone_id: e.created_at
-        for e in db.scalars(select(Event).where(
-            Event.incident_id == incident.id, Event.kind == "first_detection"))
+        for e in db.scalars(first_query)
     }
 
     zone_rows = []
@@ -202,7 +206,7 @@ def incident_state(db: Session, incident: Incident) -> dict:
             "is_demo": building.is_demo,
         },
         "mode": registry.mode,
-        "thresholds": dict(zip(("detected", "possible"), detection_thresholds(incident.source, registry.model is not None))),
+        "thresholds": threshold_dict(incident.source, registry.model is not None),
         "model_version": registry.model.version if registry.model else None,
         "server_time": iso(utcnow()),
         "zones": zone_rows,

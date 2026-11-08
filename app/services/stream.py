@@ -26,36 +26,25 @@ from ..ml.csi import Frame, frames_to_arrays
 from ..ml.features import FEATURE_NAMES, MIN_WINDOW_QUALITY, context_slice, window_quality
 from ..models import Baseline as BaselineRow
 from ..models import CalibrationRun, Event, Incident, Inference, Node, Zone, utcnow
+from .detection import RECENT_ROWS, detection_thresholds, smoothed_probability
 from .registry import registry
 
 log = logging.getLogger("watchmate")
 
-RECENT_ROWS = 12
-
-
-# 현장 실측과, 그렇게 녹화한 데이터를 다시 재생할 때는 실측 화면과 같은 1단계 기준을 쓴다.
-# 재생만 기본 기준(0.70)으로 보면 같은 녹화가 측정 기록보다 덜 감지된 것처럼 보인다.
-MEASURED_SOURCES = frozenset({"measurement", "replay"})
-
-
-def detection_thresholds(source: str, person_mode: bool) -> tuple[float, float]:
-    return (0.50, 0.20) if source in MEASURED_SOURCES and not person_mode else (0.70, 0.35)
+def detection_started_at(db: Session, incident_id: int) -> datetime | None:
+    """실측에서 경보로 전환한 뒤에는 새 운영 판단 구간만 사용한다."""
+    return db.scalar(select(Event.created_at).where(Event.incident_id == incident_id,
+                                                   Event.kind == "detection_reset")
+                     .order_by(Event.id.desc()).limit(1))
 
 
 def recent_probabilities(db, incident_id, node_id):
-    rows = db.scalars(select(Inference).where(Inference.incident_id == incident_id,
-                      Inference.node_id == node_id).order_by(Inference.id.desc()).limit(RECENT_ROWS)).all()
+    query = select(Inference).where(Inference.incident_id == incident_id, Inference.node_id == node_id)
+    since = detection_started_at(db, incident_id)
+    if since is not None:
+        query = query.where(Inference.t >= since)
+    rows = db.scalars(query.order_by(Inference.id.desc()).limit(RECENT_ROWS)).all()
     return list(reversed(rows))
-
-
-def smoothed_probability(rows):
-    result = None
-    for row in rows:
-        if row.quality is not None and row.quality < MIN_WINDOW_QUALITY:
-            continue
-        p = row.p_person if row.p_person is not None else row.p_change
-        result = p if result is None else (p + result) / 2
-    return None if result is None else round(result, 3)
 
 CALIB_MAX_SECONDS = 660.0
 MAX_CATCH_UP_SECONDS = 600.0
@@ -122,6 +111,7 @@ class StreamHub:
             select(Incident)
             .where(Incident.building_id == building_id, Incident.status == "active")
             .order_by(Incident.id.desc())
+            .execution_options(populate_existing=True)
         )
 
     def lifecycle_lock(self):
@@ -278,6 +268,7 @@ class StreamHub:
         made = 0
         recent = None
         detect_p, _ = detection_thresholds(incident.source, model is not None)
+        since = detection_started_at(db, incident.id)
         while buf.next_end <= last_t:
             end = buf.next_end
             buf.next_end += w
@@ -304,14 +295,15 @@ class StreamHub:
                 quality=round(quality, 3),
                 source=source,
             )
-            if node.zone_id is not None and (incident.id, node.zone_id) not in self._first_detect_seen:
-                p = p_person if p_person is not None else p_change
-                if incident.source in MEASURED_SOURCES:
-                    if recent is None:
-                        recent = deque(recent_probabilities(db, incident.id, node.id), maxlen=RECENT_ROWS)
-                    recent.append(row)
-                    p = smoothed_probability(recent)
-                if quality >= MIN_WINDOW_QUALITY and p is not None and p >= detect_p:
+            current_phase = since is None or row.t >= as_aware(since)
+            if (current_phase and node.zone_id is not None
+                    and (incident.id, node.zone_id) not in self._first_detect_seen):
+                # 모든 모드에서 화면과 같은 평활 확률로 첫 감지를 기록한다.
+                if recent is None:
+                    recent = deque(recent_probabilities(db, incident.id, node.id), maxlen=RECENT_ROWS)
+                recent.append(row)
+                p = smoothed_probability(recent)
+                if row.quality >= MIN_WINDOW_QUALITY and p is not None and p >= detect_p:
                     self._note_first_detection(db, incident, node, p, model is not None)
             db.add(row)
             made += 1
@@ -327,8 +319,12 @@ class StreamHub:
         key = (incident.id, node.zone_id)
         if key in self._first_detect_seen:
             return
-        exists = db.scalar(select(Event.id).where(
-            Event.incident_id == incident.id, Event.zone_id == node.zone_id, Event.kind == "first_detection"))
+        query = select(Event.id).where(Event.incident_id == incident.id, Event.zone_id == node.zone_id,
+                                       Event.kind == "first_detection")
+        since = detection_started_at(db, incident.id)
+        if since is not None:
+            query = query.where(Event.created_at >= since)
+        exists = db.scalar(query)
         self._first_detect_seen.add(key)
         if exists:
             return
@@ -345,6 +341,14 @@ class StreamHub:
             for node_id in [k for k, b in self._buffers.items() if b.incident_id == incident_id]:
                 self._buffers.pop(node_id, None)
             self._first_detect_seen = {key for key in self._first_detect_seen if key[0] != incident_id}
+
+    def reset_detection(self, db: Session, incident: Incident) -> None:
+        """실측 이력은 보존하고, 경보 이후의 판단·첫 감지를 새로 시작한다."""
+        with self._lock:
+            self.forget_incident(incident.id)
+            db.add(Event(building_id=incident.building_id, incident_id=incident.id, kind="detection_reset",
+                         message="실측 판단 구간을 마치고, 경보 수신 이후 데이터로 판단을 시작합니다."))
+            db.flush()
 
     # ---- 보정 --------------------------------------------------------
     def start_calibration(self, db: Session, building_id: int, duration_s: int) -> CalibrationRun:
