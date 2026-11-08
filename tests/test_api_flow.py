@@ -138,8 +138,9 @@ def test_manual_incident_and_uncalibrated_node(client, auth):
     assert state["zones"][0]["state"] == "uncalibrated"
 
 
-def test_calibration_finishes_on_read_with_consistent_flags(client, auth):
-    """보정 시간이 지난 뒤 첫 조회에서 '보정 끝'과 노드의 보정 여부가 함께 맞아야 한다."""
+def test_calibration_finishes_in_background_with_consistent_flags(client, auth):
+    """조회는 계산을 기다리지 않고, 완료 응답에는 저장된 기준선이 함께 보여야 한다."""
+    import time
     from datetime import datetime, timedelta, timezone
     from app.models import CalibrationRun
 
@@ -152,8 +153,14 @@ def test_calibration_finishes_on_read_with_consistent_flags(client, auth):
         run = db.query(CalibrationRun).filter(CalibrationRun.building_id == bid).one()
         run.ends_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         db.commit()
-    detail = client.get(f"/api/buildings/{bid}", headers=auth).json()
-    assert detail["calibration"]["status"] == "done"
+    deadline = time.monotonic() + 5
+    while True:
+        detail = client.get(f"/api/buildings/{bid}", headers=auth).json()
+        if detail["calibration"]["status"] == "done":
+            break
+        assert detail["calibration"]["status"] == "running"
+        assert time.monotonic() < deadline, "background calibration did not finish"
+        time.sleep(0.01)
     assert detail["nodes"][0]["calibrated"] is True
 
 

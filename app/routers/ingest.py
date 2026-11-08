@@ -34,6 +34,12 @@ def ingest_csi(body: IngestIn, node: Node = Depends(node_from_token), db: Sessio
 
 def open_incident(db: Session, building: Building, source: str, note: str) -> tuple[Incident, bool]:
     """열린 상황이 있으면 그대로 돌려주고, 없으면 새로 연다. 진행 중인 보정은 중단한다."""
+    # 잠금 밖에서 계산한 보정 결과가 경보 개시 뒤에 반영되지 않게 한다.
+    with hub.lifecycle_lock():
+        return _open_incident_locked(db, building, source, note)
+
+
+def _open_incident_locked(db: Session, building: Building, source: str, note: str) -> tuple[Incident, bool]:
     current = hub.active_incident(db, building.id)
     if current is not None:
         return current, False

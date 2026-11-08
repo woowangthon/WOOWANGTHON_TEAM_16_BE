@@ -13,6 +13,7 @@ import logging
 import math
 import threading
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -87,6 +88,22 @@ class _NodeBuffer:
         self.mismatch_noted = False
 
 
+@dataclass
+class _CalibrationInput:
+    node_id: int
+    name: str
+    restart_id: int | None
+    frames: list[Frame]
+
+
+@dataclass
+class _CalibrationJob:
+    run_id: int
+    building_id: int
+    nodes: list[_CalibrationInput]
+    done: threading.Event = field(default_factory=threading.Event)
+
+
 class StreamHub:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -96,6 +113,7 @@ class StreamHub:
         self._first_detect_seen: set[tuple[int, int]] = set()
         # 마무리한 보정 id. 같은 보정을 두 요청이 차례로 마무리하면 두 번째가 빈 프레임으로 결과를 덮어썼다(11/7).
         self._finished_calibrations: set[int] = set()
+        self._finishing_calibrations: dict[int, _CalibrationJob] = {}
 
     # ---- 조회 도우미 -------------------------------------------------
     @staticmethod
@@ -106,15 +124,27 @@ class StreamHub:
             .order_by(Incident.id.desc())
         )
 
-    def active_calibration(self, db: Session, building_id: int) -> CalibrationRun | None:
-        run = db.scalar(
+    def lifecycle_lock(self):
+        """보정 결과 반영과 건물 상황 전환을 같은 짧은 보호 구간에서 처리한다."""
+        return self._lock
+
+    @staticmethod
+    def _running_calibration(db: Session, building_id: int) -> CalibrationRun | None:
+        return db.scalar(
             select(CalibrationRun)
             .where(CalibrationRun.building_id == building_id, CalibrationRun.status == "running")
             .order_by(CalibrationRun.id.desc())
+            .execution_options(populate_existing=True)
         )
+
+    def active_calibration(self, db: Session, building_id: int) -> CalibrationRun | None:
+        run = self._running_calibration(db, building_id)
         if run is not None and as_aware(run.ends_at) <= utcnow():
-            self.finish_calibration(db, run)
-            return None
+            # 자동 마무리는 조회/수집 요청을 붙잡지 않는다. 계산에는 별도 세션을 쓴다.
+            self.finish_calibration(db, run, background=True)
+            db.refresh(run)
+            if run.status != "running":
+                return None
         return run
 
     def baseline_for(self, db: Session, node_id: int) -> Baseline | None:
@@ -167,16 +197,21 @@ class StreamHub:
     # ---- 수신 --------------------------------------------------------
     def ingest(self, db: Session, node: Node, frames: list[Frame], source: str = "live",
                restarted: bool = False) -> dict:
+        # 이 호출을 잠금 안에서 하면 RLock의 바깥 잠금이 계산 동안 남는다.
+        self.active_calibration(db, node.building_id)
         now = utcnow()
         with self._lock:
             node.last_seen_at = now
             if frames and math.isfinite(frames[-1].rssi):
                 node.last_rssi = frames[-1].rssi
 
-            run = self.active_calibration(db, node.building_id)
+            run = self._running_calibration(db, node.building_id)
             if restarted:
                 self._note_restart(db, node, calibrating=run is not None)
             if run is not None:
+                if run.id in self._finishing_calibrations:
+                    db.commit()
+                    return {"mode": "calibrating", "accepted": 0, "reason": "processing"}
                 buf = self._calib.setdefault(node.id, [])
                 buf.extend(frames)
                 if len(buf) > 2 and buf[-1].t - buf[0].t > CALIB_MAX_SECONDS:
@@ -333,43 +368,109 @@ class StreamHub:
             db.commit()
             return run
 
-    def finish_calibration(self, db: Session, run: CalibrationRun) -> CalibrationRun:
+    @staticmethod
+    def _last_restart_id(db: Session, node_id: int) -> int | None:
+        return db.scalar(select(Event.id).where(Event.node_id == node_id, Event.kind == "node_restart")
+                         .order_by(Event.id.desc()).limit(1))
+
+    def finish_calibration(self, db: Session, run: CalibrationRun, *, background: bool = False) -> CalibrationRun:
         with self._lock:
-            # 잠금을 기다리는 동안 다른 요청(수집기 전송·건물 조회·보정 끝내기)이 이미 마무리했을 수 있다.
-            # 그 요청이 들고 온 run은 '진행 중'으로 낡아 있으니 DB에서 다시 읽고, 마무리한 id도 함께 본다.
             db.refresh(run)
             if run.status != "running" or run.id in self._finished_calibrations:
                 return run
-            nodes = db.scalars(select(Node).where(Node.building_id == run.building_id, Node.role == "rx")).all()
-            results: dict[str, dict] = {}
-            ok = 0
-            for node in nodes:
-                frames = self._calib.pop(node.id, [])
-                entry: dict = {"node": node.name, "frames": len(frames)}
-                if not frames:
+            job = self._finishing_calibrations.get(run.id)
+            owner = job is None
+            if owner:
+                nodes = db.scalars(select(Node).where(Node.building_id == run.building_id,
+                                                      Node.role == "rx")).all()
+                job = _CalibrationJob(run.id, run.building_id, [
+                    _CalibrationInput(n.id, n.name, self._last_restart_id(db, n.id),
+                                      self._calib.pop(n.id, [])) for n in nodes
+                ])
+                self._finishing_calibrations[run.id] = job
+            bind = db.get_bind()
+            # 긴 계산/대기 중에는 요청의 트랜잭션이나 DB 연결을 붙잡지 않는다.
+            db.commit()
+
+        if owner:
+            if background:
+                threading.Thread(target=self._calculate_calibration, args=(job, bind),
+                                 name=f"calibration-{job.run_id}", daemon=True).start()
+            else:
+                self._calculate_calibration(job, bind)
+        elif not background:
+            # 같은 보정의 중복 종료도 전역 잠금 밖에서 기다린다.
+            job.done.wait()
+        db.refresh(run)
+        return run
+
+    def _calculate_calibration(self, job: _CalibrationJob, bind) -> None:
+        results: dict[str, dict] = {}
+        baselines: dict[int, Baseline] = {}
+        try:
+            # 배열 변환/SVD를 포함한 모든 계산은 잠금과 DB 세션 밖에서 실행한다.
+            for item in job.nodes:
+                entry = {"node": item.name, "frames": len(item.frames)}
+                results[str(item.node_id)] = entry
+                if not item.frames:
                     entry.update(ok=False, error="보정 시간 동안 들어온 프레임이 없습니다.")
-                    results[str(node.id)] = entry
                     continue
-                t, rssi, amp = frames_to_arrays(frames)
                 try:
+                    t, rssi, amp = frames_to_arrays(item.frames)
                     base = fit_baseline(t, rssi, amp, settings.window_seconds, settings.context_seconds)
                 except BaselineError as exc:
                     entry.update(ok=False, error=str(exc))
-                    results[str(node.id)] = entry
                     continue
-                self.store_baseline(db, node, base)
-                ok += 1
+                except Exception:
+                    log.exception("노드 %s 기준선 계산 실패", item.node_id)
+                    entry.update(ok=False, error="기준선 계산 중 오류가 발생했습니다. 다시 보정하세요.")
+                    continue
+                baselines[item.node_id] = base
                 entry.update(ok=True, windows=base.n_windows, fps=round(base.fps, 1), tau=round(base.tau, 2),
                              subcarriers=base.n_subcarriers, subcarriers_used=int(base.mask.sum()))
-                results[str(node.id)] = entry
-            run.status = "done" if ok else "failed"
-            run.finished_at = utcnow()
-            run.result = results
-            db.add(Event(building_id=run.building_id, kind="calibration",
-                         message=f"기준선 보정 {'완료' if ok else '실패'}: 노드 {ok}/{len(nodes)}개"))
-            db.commit()
-            self._finished_calibrations.add(run.id)
-            return run
+
+            with Session(bind, autoflush=False, expire_on_commit=False) as db, self._lock:
+                run = db.get(CalibrationRun, job.run_id)
+                current = self._running_calibration(db, job.building_id)
+                # 계산 중 새 보정이나 경보가 시작됐다면 옛 결과는 저장하지 않는다.
+                if (run is None or run.status != "running" or current is None
+                        or current.id != job.run_id or self.active_incident(db, job.building_id) is not None):
+                    return
+                ok = 0
+                for item in job.nodes:
+                    base = baselines.get(item.node_id)
+                    if base is None:
+                        continue
+                    node = db.get(Node, item.node_id)
+                    entry = results[str(item.node_id)]
+                    if node is None or node.building_id != job.building_id or node.role != "rx":
+                        entry.update(ok=False, error="계산 중 노드 설정이 변경되어 기준선을 저장하지 않았습니다.")
+                    elif self._last_restart_id(db, node.id) != item.restart_id:
+                        entry.update(ok=False, error="계산 중 보드가 다시 켜졌습니다. 다시 보정하세요.")
+                    else:
+                        self.store_baseline(db, node, base)
+                        ok += 1
+                run.status = "done" if ok else "failed"
+                run.finished_at = utcnow()
+                run.result = results
+                db.add(Event(building_id=run.building_id, kind="calibration",
+                             message=f"기준선 보정 {'완료' if ok else '실패'}: 노드 {ok}/{len(job.nodes)}개"))
+                db.commit()
+                self._finished_calibrations.add(run.id)
+        except Exception:
+            log.exception("보정 %s 결과 반영 실패", job.run_id)
+            # 백그라운드 오류 뒤에도 영원히 진행 중으로 남기지 않는다.
+            with Session(bind, expire_on_commit=False) as db, self._lock:
+                run = db.get(CalibrationRun, job.run_id)
+                if run is not None and run.status == "running":
+                    run.status = "failed"
+                    run.finished_at = utcnow()
+                    run.result = {"_note": "보정 처리 중 오류가 발생했습니다. 다시 보정하세요."}
+                    db.commit()
+        finally:
+            with self._lock:
+                self._finishing_calibrations.pop(job.run_id, None)
+                job.done.set()
 
     def store_baseline(self, db: Session, node: Node, base: Baseline) -> BaselineRow:
         db.execute(update(BaselineRow).where(BaselineRow.node_id == node.id, BaselineRow.active.is_(True))
@@ -384,7 +485,10 @@ class StreamHub:
         with self._lock:
             out = {}
             for nid in node_ids:
-                frames = self._calib.get(nid, [])
+                frames = self._calib.get(nid)
+                if frames is None:
+                    frames = next((item.frames for job in self._finishing_calibrations.values()
+                                   for item in job.nodes if item.node_id == nid), [])
                 span = frames[-1].t - frames[0].t if len(frames) > 1 else 0.0
                 out[nid] = {"frames": len(frames), "seconds": round(span, 1)}
             return out

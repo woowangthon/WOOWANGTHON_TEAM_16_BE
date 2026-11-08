@@ -68,6 +68,9 @@ def _node_infos(db: Session, incident: Incident, rx: list[Node], freeze: bool = 
             status, reason = "stale", "low_rate"  # 신호는 오지만 프레임이 모자라 판단할 수 없음
         elif not good:
             status = "warming"
+        elif (now - as_aware(good[-1].t)).total_seconds() > settings.stale_seconds:
+            # 접속 시각만 보면 깨진 프레임·중복 프레임만 오는 동안에도 오래된 판단을 정상으로 보인다.
+            status, reason = "stale", "stale_inference"
         else:
             status = "ok"
         last = good[-1] if good else None
