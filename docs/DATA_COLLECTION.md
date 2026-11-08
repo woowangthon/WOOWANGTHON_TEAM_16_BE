@@ -148,6 +148,8 @@ python tools/collector.py session --plan docs/plans/day_plan.csv --day 2026-11-0
 
 ## 7. 학습과 확인
 
+실제 입장부터 몇 초 만에 감지했는지 평가하려면 관측자가 입장·자세 정착·퇴장 시각과 사람이 없었던 구간을 별도 주석으로 남겨야 합니다. Enter를 누른 시각이나 장면 시작을 실제 입장으로 취급하지 않습니다. [실제 입장 기준 평가 가이드](EVENT_EVALUATION.md)의 시각 원점과 JSON 형식을 따르세요. 사람 판별 모델 없이 신호 변화만 평가하는 명령도 제공됩니다. 주석이 없는 예전 녹화의 입장 시각을 자동으로 복원하지 않습니다.
+
 ```bash
 python -m app.ml.train --data ../data/sessions --out models/presence_model.joblib --source-note "공학관 301·302호와 복도, 11/1~11/7 수집"
 ```

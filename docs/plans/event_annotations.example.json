@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "trials": [
+    {
+      "trial_id": "FORMAT_EXAMPLE_NOT_A_MEASUREMENT",
+      "zone_id": "EXAMPLE_ZONE_REPLACE_WITH_OBSERVED_ZONE",
+      "session_ids": [
+        "REPLACE_WITH_REAL_RX_A_SESSION_ID",
+        "REPLACE_WITH_REAL_RX_B_SESSION_ID"
+      ],
+      "origin_session_id": "REPLACE_WITH_REAL_RX_A_SESSION_ID",
+      "start_s": 0,
+      "end_s": 420,
+      "events": [
+        {
+          "event_id": "entry-01",
+          "entered_s": 60,
+          "pose_s": 65,
+          "exited_s": 120,
+          "label": "sitting"
+        },
+        {
+          "event_id": "entry-02",
+          "entered_s": 180,
+          "pose_s": 185,
+          "exited_s": 240,
+          "label": "sitting"
+        },
+        {
+          "event_id": "entry-03",
+          "entered_s": 300,
+          "pose_s": 305,
+          "exited_s": 360,
+          "label": "sitting"
+        }
+      ],
+      "empty_intervals": [
+        {
+          "start_s": 0,
+          "end_s": 60
+        },
+        {
+          "start_s": 120,
+          "end_s": 180
+        },
+        {
+          "start_s": 240,
+          "end_s": 300
+        },
+        {
+          "start_s": 360,
+          "end_s": 420
+        }
+      ]
+    },
+    {
+      "trial_id": "FORMAT_EXAMPLE_PREPARED_SCENE_NOT_A_MEASUREMENT",
+      "zone_id": "EXAMPLE_PREPARED_ZONE_REPLACE_WITH_OBSERVED_ZONE",
+      "session_ids": [
+        "REPLACE_WITH_REAL_PREPARED_RX_A_SESSION_ID",
+        "REPLACE_WITH_REAL_PREPARED_RX_B_SESSION_ID"
+      ],
+      "origin_session_id": "REPLACE_WITH_REAL_PREPARED_RX_A_SESSION_ID",
+      "start_s": 0,
+      "end_s": 60,
+      "events": [],
+      "empty_intervals": [],
+      "settled_intervals": [
+        {
+          "start_s": 0,
+          "end_s": 60,
+          "label": "sitting"
+        }
+      ]
+    }
+  ]
+}

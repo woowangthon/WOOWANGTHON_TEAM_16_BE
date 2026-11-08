@@ -29,10 +29,13 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 
 from ..config import settings
+from ..services.detection import DETECTION_SOURCES
 from .baseline import Baseline, BaselineError, fit_baseline
 from .features import FEATURE_NAMES, MIN_WINDOW_QUALITY, context_slice, iter_windows, window_quality
 from .model import PresenceModel
 from .sessions import LABEL_KO, PERSON_LABELS, Session, load_sessions
+from .event_annotations import labels_for_windows, load_event_annotations
+from .event_validation import evaluate_validation_events
 
 THRESHOLDS = {"possible": 0.35, "half": 0.5, "detected": 0.70}
 MIN_BASELINE_SECONDS = 20.0
@@ -101,17 +104,17 @@ def _windows(session: Session, base: Baseline,
         return None, count
     zs, pcs, trel = [], [], []
     w, c = settings.window_seconds, settings.context_seconds
-    for i0, i1, t_end in iter_windows(session.t, w):
-        if start_after is not None and t_end - w < start_after:
-            continue
+    begin = 0 if start_after is None else int(np.searchsorted(session.t, start_after))
+    t, rssi, amp = session.t[begin:], session.rssi[begin:], session.amp[begin:]
+    for i0, i1, t_end in iter_windows(t, w):
         q = window_quality(i1 - i0, base.fps, w)
         count.total += 1
         count.quality_sum += q
         if q < MIN_WINDOW_QUALITY:
             count.short += 1
             continue
-        c0, c1 = context_slice(session.t, t_end, c)
-        f = base.features(session.amp[i0:i1], session.rssi[i0:i1], session.amp[c0:c1], session.t[c0:c1])
+        c0, c1 = context_slice(t, t_end, c)
+        f = base.features(amp[i0:i1], rssi[i0:i1], amp[c0:c1], t[c0:c1])
         if f is None:
             continue
         z = base.zscore(f)
@@ -137,7 +140,9 @@ def _concat(sets: list[WindowSet]) -> WindowSet:
 
 
 def build_day_windows(sessions: list[Session], baseline_from: dict | None = None,
-                      counts: dict[str, WindowCount] | None = None) -> tuple[dict, list[str], dict]:
+                      counts: dict[str, WindowCount] | None = None, *,
+                      annotations_by_session: dict | None = None,
+                      annotation_counts: dict | None = None) -> tuple[dict, list[str], dict]:
     """날짜별 WindowSet. baseline_from={(node, day): Baseline}을 주면 그 기준선을 쓴다(재보정 없음 실험).
     counts를 주면 라벨별 창 수와 프레임이 모자라 뺀 창 수를 채운다."""
     notes: list[str] = []
@@ -178,6 +183,23 @@ def build_day_windows(sessions: list[Session], baseline_from: dict | None = None
                 continue
             if cnt.short and counts is not None:
                 notes.append(f"{s.session_id}: 프레임이 모자란 창 {cnt.short}/{cnt.total}개를 뺐습니다")
+            if annotations_by_session and s.session_id in annotations_by_session:
+                ends = s.start + ws.t_rel
+                labels = labels_for_windows(annotations_by_session[s.session_id],
+                                            ends - settings.window_seconds, ends)
+                keep = np.array([label is not None for label in labels], dtype=bool)
+                if annotation_counts is not None:
+                    annotation_counts[s.session_id] = {
+                        "candidate_windows": int(keep.size), "included_windows": int(keep.sum()),
+                        "excluded_transition_or_unannotated": int((~keep).sum()),
+                    }
+                if not keep.any():
+                    notes.append(f"{s.session_id}: 학습에 쓸 명시적인 빈 방·자세 정착 구간이 없어 창을 제외했습니다. 사건 평가에서는 제외하지 않습니다.")
+                    continue
+                known_labels = [label for label in labels if label is not None]
+                ws = WindowSet(ws.z[keep], np.array([int(label in PERSON_LABELS) for label in known_labels]),
+                               ws.p_change[keep], known_labels,
+                               [sid for sid, included in zip(ws.session, keep) if included], ws.t_rel[keep])
             per_day[day].append(ws)
     return {d: _concat(v) for d, v in per_day.items() if v}, notes, baselines
 
@@ -219,24 +241,17 @@ def _metrics(y: np.ndarray, p: np.ndarray, labels: list[str]) -> dict:
     return out
 
 
-def _time_to_detect(ws: WindowSet, p: np.ndarray, alpha: float = 0.5) -> float | None:
-    times = []
-    sessions = np.array(ws.session)
-    for sid in sorted(set(ws.session)):
-        m = sessions == sid
-        if ws.y[m][0] != 1:
-            continue
-        order = np.argsort(ws.t_rel[m])
-        ema = None
-        found = None
-        for t_rel, pv in zip(ws.t_rel[m][order], p[m][order]):
-            ema = pv if ema is None else alpha * pv + (1 - alpha) * ema
-            if ema >= THRESHOLDS["detected"]:
-                found = float(t_rel)
-                break
-        if found is not None:
-            times.append(found)
-    return float(np.median(times)) if times else None
+def _unavailable_metrics(y: np.ndarray, labels: list[str], reason: str) -> dict:
+    """모델을 검증할 수 없는 분할에서 예측값이나 0점을 만들어 채우지 않는다."""
+    return {
+        "status": "unavailable", "reason": reason, "n_windows": int(y.size),
+        "n_person": int(y.sum()), "n_nonperson": int((1 - y).sum()),
+        **{name: {"threshold": value, **dict.fromkeys(("recall", "false_alarm_rate", "precision", "f1", "tp", "fp", "fn", "tn"))}
+           for name, value in THRESHOLDS.items()},
+        "by_label": {label: {"label_ko": LABEL_KO.get(label, label), "n_windows": labels.count(label),
+                              "is_person": label in PERSON_LABELS, "rate_at_0.70": None}
+                     for label in sorted(set(labels))},
+    }
 
 
 def _round(obj):
@@ -249,12 +264,19 @@ def _round(obj):
     return obj
 
 
-def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "") -> dict:
+def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "", *,
+          events_path: Path | None = None, evaluation_source: str = "measurement",
+          event_timeout_seconds: float = 30.0) -> dict:
     sessions, problems = load_sessions(data_dir)
     if not sessions:
         raise SystemExit("세션을 찾지 못했습니다. --data 경로와 파일 형식을 확인하세요.\n" + "\n".join(problems))
+    annotations = load_event_annotations(events_path, sessions) if events_path is not None else []
+    annotations_by_session = {sid: annotation for annotation in annotations for sid in annotation.session_ids}
+    annotation_counts = {}
     counts: dict[str, WindowCount] = {}
-    per_day, notes, baselines = build_day_windows(sessions, counts=counts)
+    per_day, notes, baselines = build_day_windows(sessions, counts=counts,
+                                                annotations_by_session=annotations_by_session,
+                                                annotation_counts=annotation_counts)
     notes = problems + notes
     days = sorted(per_day)
     if not days:
@@ -264,6 +286,7 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
         raise SystemExit("사람 있음/없음 두 종류 데이터가 모두 있어야 합니다.")
 
     folds = []
+    fold_models = {}
     method = "leave-one-day-out"
     if len(days) >= 2:
         # 재보정 없이: 각 노드의 첫날 기준선으로 다른 날을 평가
@@ -271,7 +294,8 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
         for (node, day) in baselines:
             first = min(d for (n, d) in baselines if n == node)
             first_day_base[(node, day)] = baselines[(node, first)]
-        cross_days, _, _ = build_day_windows(sessions, baseline_from=first_day_base)
+        cross_days, _, _ = build_day_windows(sessions, baseline_from=first_day_base,
+                                             annotations_by_session=annotations_by_session)
 
         for d in days:
             train_set = _concat([per_day[x] for x in days if x != d])
@@ -279,12 +303,14 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
             if len(set(train_set.y.tolist())) < 2:
                 continue
             clf = _make_clf(kind).fit(train_set.z, train_set.y)
+            fold_models[d] = clf
             p = clf.predict_proba(test_set.z)[:, 1]
             fold = {
                 "held_out_day": d,
                 "model": _metrics(test_set.y, p, test_set.label),
                 "stage1_only": _metrics(test_set.y, test_set.p_change, test_set.label),
-                "median_seconds_to_detect": _time_to_detect(test_set, p),
+                # 세션 시작은 실제 입장이 아니다. 새 사건 평가의 명시적인 지연 지표를 사용한다.
+                "median_seconds_to_detect": None,
             }
             if d in cross_days and d != min(days):
                 cs = cross_days[d]
@@ -298,16 +324,42 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
             m = np.where(sess == sid)[0]
             order = m[np.argsort(full.t_rel[m])]
             train_m[order[: int(len(order) * 0.6)]] = True
-        clf = _make_clf(kind).fit(full.z[train_m], full.y[train_m])
         test_m = ~train_m
-        p = clf.predict_proba(full.z[test_m])[:, 1]
         test_labels = [lab for lab, keep in zip(full.label, test_m) if keep]
+        if len(set(full.y[train_m].tolist())) < 2 or not test_m.any():
+            reason = "시간 순서 분할의 학습 구간에 두 클래스가 없거나 검증 창이 없습니다. 순서를 섞어 성능을 만들지 않았습니다."
+            model_metrics = _unavailable_metrics(full.y[test_m], test_labels, reason)
+            notes.append(reason)
+        else:
+            clf = _make_clf(kind).fit(full.z[train_m], full.y[train_m])
+            p = clf.predict_proba(full.z[test_m])[:, 1]
+            model_metrics = _metrics(full.y[test_m], p, test_labels)
         folds.append({
             "held_out_day": "같은 날 세션 뒤쪽 40%",
-            "model": _metrics(full.y[test_m], p, test_labels),
+            "model": model_metrics,
             "stage1_only": _metrics(full.y[test_m], full.p_change[test_m], test_labels),
             "median_seconds_to_detect": None,
         })
+
+    by_node_day = defaultdict(list)
+    for session in sessions:
+        by_node_day[(session.node, session.day)].append(session)
+    calibration_cutoffs = {}
+    for group in by_node_day.values():
+        baseline_session, rest = _empty_split(group)
+        if baseline_session is not None:
+            cutoff = rest[0][1] if rest and rest[0][0] is baseline_session else None
+            calibration_cutoffs[baseline_session.session_id] = cutoff
+    event_evaluation, event_folds = evaluate_validation_events(
+        sessions, baselines, fold_models, events_path, calibration_cutoffs,
+        source=evaluation_source, timeout_seconds=event_timeout_seconds,
+        resolved_annotations=annotations,
+    )
+    for fold in folds:
+        fold["event_evaluation"] = event_folds.get(fold["held_out_day"], {
+            "status": "unavailable", "reason": "이 검증 그룹 전체에 대응하는 실제 입장 주석 평가가 없습니다."
+        })
+    notes.append("median_seconds_to_detect는 녹화 시작과 실제 입장을 혼동하므로 더 이상 계산하지 않습니다. 실제 입장 지연은 validation.event_evaluation을 확인하세요.")
 
     def mean_of(key: str, metric: str, th: str = "detected"):
         vals = [f[key][th][metric] for f in folds if key in f and f[key][th][metric] is not None]
@@ -350,6 +402,7 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
             "windows": int(full.y.size),
             "windows_by_label": dict(label_counts),
             "person_labels": sorted(PERSON_LABELS),
+            "annotation_training_windows": annotation_counts,
             # 사람 장면에서만 프레임이 덜 들어왔다면 결과가 낙관적일 수 있다. 라벨마다 비교해 본다
             "frame_check": {
                 "min_frames_vs_empty": MIN_WINDOW_QUALITY,
@@ -359,7 +412,8 @@ def train(data_dir: Path, out_path: Path, kind: str = "lr", source_note: str = "
                 },
             },
         },
-        "validation": {"method": method, "folds": folds, "summary": summary},
+        "validation": {"method": method, "folds": folds, "summary": summary,
+                       "event_evaluation": event_evaluation},
         "notes": notes,
         "limitations": [
             "기척이 감지되지 않았다고 사람이 없다는 뜻은 아닙니다.",
@@ -382,9 +436,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, default=settings.model_path, help="모델 저장 경로")
     ap.add_argument("--classifier", choices=["lr", "hgb"], default="lr")
     ap.add_argument("--source-note", default="", help="모델 카드에 적을 데이터 출처 설명")
+    ap.add_argument("--events", type=Path, help="관측자가 기록한 실제 입장·퇴장 주석 JSON")
+    ap.add_argument("--evaluation-source", choices=DETECTION_SOURCES, default="measurement",
+                    help="사건 평가의 기본 시작 방식(실측·운영 비교도 함께 저장)")
+    ap.add_argument("--event-timeout-seconds", type=float, default=30.0,
+                    help="입장 후 제시간 감지로 세는 제한 시간(기본 30초)")
     args = ap.parse_args(argv)
 
-    card = train(args.data, args.out, args.classifier, args.source_note)
+    try:
+        card = train(args.data, args.out, args.classifier, args.source_note, events_path=args.events,
+                     evaluation_source=args.evaluation_source, event_timeout_seconds=args.event_timeout_seconds)
+    except ValueError as exc:
+        ap.error(str(exc))
     v = card["validation"]
     print(f"검증 방식: {v['method']}")
     for f in v["folds"]:
@@ -398,6 +461,17 @@ def main(argv: list[str] | None = None) -> int:
         print(line)
     for n in card.get("notes", []):
         print("  참고:", n)
+    events = v["event_evaluation"]
+    if events["status"] == "unavailable":
+        print("실제 입장 기준 평가:", events["reason"])
+    else:
+        print(f"실제 입장 기준 평가: {events['status']} · 기본 {events['source']} · 제한 {events['timeout_seconds']:g}초")
+        for source, profiles in events["by_source"].items():
+            for name, report in profiles.items():
+                if report["status"] == "unavailable":
+                    print(f"  [{source}/{name}] 산출 불가: {report['reason']}")
+                    continue
+                print(f"  [{source}/{name}] 사건 {json.dumps(report['counts'], ensure_ascii=False)}")
     print(f"모델 저장: {args.out}")
     print(f"모델 카드: {args.out.with_suffix('.card.json')}")
     return 0

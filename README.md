@@ -93,6 +93,18 @@ tests/               단위·API 통합 테스트
 - 같은 데이터로 1단계만 쓴 경우, 다른 날 기준선을 그대로 쓴 경우(재보정 없음)를 함께 잽니다.
 - 누워 있음·가려진 자리는 재현율을, 옆 구역에만 사람이 있을 때와 선풍기·문·열기류는 오경보율을 따로 보고합니다.
 
+실제 입장부터의 반응시간은 별도로 평가합니다. 장면 시작 시각을 입장으로 대신 쓰지 않으며, 실제 입장 주석이 없으면 사건 평가는 `unavailable`입니다. 예전 `median_seconds_to_detect`는 더 이상 계산하지 않습니다. 새 결과에는 전체 사건 수·제시간 감지·늦은 감지·미탐·무판단·관찰 부족·입장 전부터 감지 중인 경우와 판단 가능 시간 비율이 함께 나옵니다.
+
+```bash
+# 사람 판별 모델 학습 없이 현재 1단계 신호 변화 평가
+python -m app.ml.evaluate_events --data ../data/sessions --events events.json --out event_results.json
+
+# 학습과 함께 실제 입장 평가를 모델 카드에 저장
+python -m app.ml.train --data ../data/sessions --out models/presence_model.joblib --events events.json
+```
+
+입장·자세 정착·퇴장을 관측해 기록하는 방법, 시각 원점, 지표의 분모와 실측·운영 기준 비교는 [실제 입장 기준 평가 가이드](docs/EVENT_EVALUATION.md)에 정리했습니다. 예제 주석은 형식 설명용이며 실제 성능 결과가 아닙니다.
+
 ## 로컬 실행
 
 Python 3.11 이상(3.13에서 테스트). 저장소 루트에서 실행합니다.

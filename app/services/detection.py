@@ -9,6 +9,7 @@ DETECTION_SOURCES = ("alarm", "manual", "measurement", "replay")
 MEASURED_SOURCES = frozenset({"measurement", "replay"})
 RECENT_ROWS = 12
 EMA_ALPHA = 0.5
+MIN_WINDOWS_FOR_NOT_DETECTED = 3
 
 
 def detection_thresholds(source: str, person_mode: bool) -> tuple[float, float]:

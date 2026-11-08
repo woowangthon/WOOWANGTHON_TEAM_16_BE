@@ -15,10 +15,8 @@ from ..models import Baseline as BaselineRow
 from ..models import Building, Decision, Event, Incident, Node, Zone, utcnow
 from ..serializers import incident_out, iso
 from .registry import registry
-from .detection import detection_thresholds, smoothed_probability, threshold_dict
+from .detection import MIN_WINDOWS_FOR_NOT_DETECTED, detection_thresholds, smoothed_probability, threshold_dict
 from .stream import as_aware, detection_started_at, hub, recent_probabilities
-
-MIN_WINDOWS_FOR_NOT_DETECTED = 3
 
 STATE_RANK = {
     "detected": 0,
