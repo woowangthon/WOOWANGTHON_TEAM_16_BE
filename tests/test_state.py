@@ -27,6 +27,27 @@ def test_measurement_thresholds_and_low_quality_windows():
     assert _zone_state([info], "alarm")[0] == "possible"
 
 
+def test_measurement_thresholds_follow_settings(monkeypatch):
+    # 첫 회차 빈 방 결과를 보고 서버 환경변수로 실측 기준을 바꾼다. 화재 경보 기준은 그대로다.
+    from dataclasses import replace
+
+    from app import config
+    from app.services import detection
+
+    monkeypatch.setattr(detection, "settings", replace(detection.settings, measure_detect_p=0.6, measure_possible_p=0.3))
+    assert detection_thresholds("measurement", False) == (0.6, 0.3)
+    assert detection_thresholds("alarm", False) == (0.70, 0.35)
+    assert detection.threshold_dict("measurement", False) == {"detected": 0.6, "possible": 0.3}  # 기준 안내 API도 같은 값
+    info = dict(status="ok", p=0.55, evidence=[], windows=3)
+    assert _zone_state([info], "measurement")[0] == "possible"
+
+    monkeypatch.setenv("MEASURE_DETECT_P", "0.6")
+    monkeypatch.setenv("MEASURE_POSSIBLE_P", "0.25")
+    assert config._measure_thresholds() == (0.6, 0.25)
+    monkeypatch.setenv("MEASURE_POSSIBLE_P", "0.9")  # 가능 기준이 큼 기준보다 높으면 기본값으로
+    assert config._measure_thresholds() == (0.50, 0.20)
+
+
 @pytest.mark.parametrize("restart_after_close", [True, False])
 def test_closed_incident_uses_restart_state_at_close(restart_after_close):
     engine = create_engine("sqlite:///:memory:")

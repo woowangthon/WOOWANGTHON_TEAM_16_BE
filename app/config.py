@@ -53,6 +53,22 @@ class Settings:
     window_seconds: float = 2.0
     context_seconds: float = 16.0
     stale_seconds: float = 6.0
+    # 현장 실측·녹화 재생에서 모델 없이 쓰는 구역 판정 기준(신호 변화 큼 · 가능). 첫 회차 빈 방 결과를 보고
+    # MEASURE_DETECT_P·MEASURE_POSSIBLE_P로 바꾼다. 화재 경보·수동 개시는 0.70·0.35 그대로다.
+    measure_detect_p: float = 0.50
+    measure_possible_p: float = 0.20
+
+
+def _measure_thresholds() -> tuple[float, float]:
+    try:
+        detect = float(os.getenv("MEASURE_DETECT_P", "") or 0.50)
+        possible = float(os.getenv("MEASURE_POSSIBLE_P", "") or 0.20)
+    except ValueError:
+        detect = possible = -1.0
+    if not 0 < possible < detect < 1:
+        log.warning("MEASURE_DETECT_P·MEASURE_POSSIBLE_P는 0 < 가능 < 큼 < 1이어야 합니다. 기본값 0.50·0.20을 씁니다.")
+        return 0.50, 0.20
+    return detect, possible
 
 
 def load_settings() -> Settings:
@@ -75,6 +91,7 @@ def load_settings() -> Settings:
     sample_dir = Path(os.getenv("SAMPLE_DATA_DIR", "") or BACKEND_DIR / "sample_data")
     if not sample_dir.is_absolute():
         sample_dir = BACKEND_DIR / sample_dir
+    measure_detect_p, measure_possible_p = _measure_thresholds()
 
     return Settings(
         database_url=_normalize_db_url(db_url),
@@ -86,6 +103,8 @@ def load_settings() -> Settings:
         sample_data_dir=sample_dir,
         token_ttl_hours=int(os.getenv("TOKEN_TTL_HOURS", "12")),
         allow_synthetic_demo=os.getenv("ALLOW_SYNTHETIC_DEMO", "0").strip().lower() in {"1", "true", "yes"},
+        measure_detect_p=measure_detect_p,
+        measure_possible_p=measure_possible_p,
     )
 
 
