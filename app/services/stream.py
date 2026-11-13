@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 import threading
@@ -98,6 +99,7 @@ class StreamHub:
         self._lock = threading.RLock()
         self._buffers: dict[int, _NodeBuffer] = {}
         self._calib: dict[int, list[Frame]] = {}
+        self._calib_live: dict[int, dict] = {}  # 보정 중 화면에 보일 값(2초 구간별 흔들림·신호 세기)
         self._baseline_cache: dict[int, tuple[int, Baseline]] = {}
         self._first_detect_seen: set[tuple[int, int]] = set()
         # 마무리한 보정 id. 같은 보정을 두 요청이 차례로 마무리하면 두 번째가 빈 프레임으로 결과를 덮어썼다(11/7).
@@ -176,6 +178,7 @@ class StreamHub:
         incident = self.active_incident(db, node.building_id)
         if calibrating:
             self._calib.pop(node.id, None)  # 다시 켜지기 전 신호는 크기 기준이 달라 기준선에 섞지 않는다
+            self._calib_live.pop(node.id, None)
             message = f"{node.name}: 보정 중에 보드가 다시 켜졌습니다. 그 전까지 모은 신호는 버리고 다시 모읍니다."
         else:
             message = (f"{node.name}: 보드가 다시 켜졌습니다. 신호 크기 기준이 바뀌었을 수 있어, "
@@ -365,6 +368,7 @@ class StreamHub:
                 raise CalibrationError("수신(RX) 노드가 없습니다. 먼저 노드를 등록하세요.")
             for n in nodes:
                 self._calib[n.id] = []
+                self._calib_live.pop(n.id, None)
             run = CalibrationRun(building_id=building_id, ends_at=utcnow() + timedelta(seconds=duration_s))
             db.add(run)
             db.add(Event(building_id=building_id, kind="calibration",
@@ -391,6 +395,8 @@ class StreamHub:
                     _CalibrationInput(n.id, n.name, self._last_restart_id(db, n.id),
                                       self._calib.pop(n.id, [])) for n in nodes
                 ])
+                for n in nodes:
+                    self._calib_live.pop(n.id, None)
                 self._finishing_calibrations[run.id] = job
             bind = db.get_bind()
             # 긴 계산/대기 중에는 요청의 트랜잭션이나 DB 연결을 붙잡지 않는다.
@@ -490,12 +496,58 @@ class StreamHub:
             out = {}
             for nid in node_ids:
                 frames = self._calib.get(nid)
+                live = self._calibration_live(nid, frames) if frames else None
                 if frames is None:
                     frames = next((item.frames for job in self._finishing_calibrations.values()
                                    for item in job.nodes if item.node_id == nid), [])
                 span = frames[-1].t - frames[0].t if len(frames) > 1 else 0.0
-                out[nid] = {"frames": len(frames), "seconds": round(span, 1)}
+                out[nid] = {"frames": len(frames), "seconds": round(span, 1), "live": live}
             return out
+
+    def _calibration_live(self, nid: int, frames: list[Frame]) -> dict | None:
+        """보정 중인 보드의 지금 상태. 2초 구간마다 한 번만 계산해 쌓아 둔다(락을 잡은 채 부른다).
+
+        흔들림 = 이웃한 프레임 사이의 진폭 모양 변화(프레임 평균 크기로 나눈 값의 차이 평균).
+        이번 보정의 중간값과 견줘 '평소의 몇 배'로 보여 준다. 사람이 움직이면 커진다.
+        """
+        width = 2.0
+        st = self._calib_live.setdefault(nid, {"t_next": frames[0].t, "wins": []})
+        if st["t_next"] < frames[0].t - width:
+            st["t_next"] = frames[0].t
+        key = lambda f: f.t  # noqa: E731
+        while frames[-1].t >= st["t_next"] + width:
+            i0 = bisect.bisect_left(frames, st["t_next"], key=key)
+            i1 = bisect.bisect_left(frames, st["t_next"] + width, key=key)
+            st["t_next"] += width
+            if i1 - i0 < 8:
+                continue
+            try:
+                amp = np.vstack([f.amp for f in frames[i0:i1]]).astype(np.float64)
+            except ValueError:  # 서브캐리어 수가 섞인 구간은 건너뛴다
+                continue
+            level = amp.mean(axis=1, keepdims=True)
+            level[level <= 0] = 1.0
+            wobble = float(np.mean(np.abs(np.diff(amp / level, axis=0))))
+            rssi = [f.rssi for f in frames[i0:i1] if math.isfinite(f.rssi)]
+            st["wins"].append((wobble, sum(rssi) / len(rssi) if rssi else float("nan"), (i1 - i0) / width))
+        wins = st["wins"]
+        if not wins:
+            return None
+        typical = float(np.median([w for w, _, _ in wins])) if len(wins) >= 5 else None
+        rssis = [r for _, r, _ in wins if math.isfinite(r)]
+        start = rssis[:5]
+        ratio = (lambda w: round(w / typical, 2)) if typical else (lambda w: None)
+        return {
+            "windows": len(wins),
+            "fps": round(wins[-1][2], 1),
+            "rssi": round(rssis[-1], 1) if rssis else None,
+            "rssi_start": round(sum(start) / len(start), 1) if start else None,
+            "rssi_min": round(min(rssis), 1) if rssis else None,
+            "rssi_max": round(max(rssis), 1) if rssis else None,
+            "wobble": ratio(wins[-1][0]),
+            "loud": sum(1 for w, _, _ in wins if w > 1.5 * typical) if typical else 0,
+            "series": [ratio(w) for w, _, _ in wins[-60:]] if typical else [],
+        }
 
 
 hub = StreamHub()
