@@ -11,11 +11,21 @@
 
 ## 바로 써 보기
 
-- 서비스: `https://<배포 주소>` (제출 폼에 적은 주소)
-- API 문서: `https://<백엔드 주소>/docs`, 상태 확인: `https://<백엔드 주소>/api/health`
+- 화면: https://watchmate-16.vercel.app
+- 서버: https://watchmate-api-aikg.onrender.com (API 문서 [/docs](https://watchmate-api-aikg.onrender.com/docs), 상태 확인 [/api/health](https://watchmate-api-aikg.onrender.com/api/health), 모델 카드 [/api/model/card](https://watchmate-api-aikg.onrender.com/api/model/card))
 - 테스트 계정: 제출 폼에 적은 아이디·비밀번호
-- 확인 순서: 로그인 → 건물 목록의 "녹화 데이터로 시연"에서 실측 녹화 시나리오의 재생 시작 → 지휘 화면에서 구역 상태와 근거를 보고 구역 하나에 수색 중·구조 완료 기록 → 상황 종료 → 위쪽 메뉴의 AI 검증에서 모델 카드 확인
-- 무료 서버라 처음 접속하면 깨우는 데 1분쯤 걸릴 수 있습니다.
+
+확인 순서
+
+1. 화면에 로그인합니다.
+2. 위쪽 메뉴 **고급 설정**의 **녹화 재생(시연)** 칸에서 "실제 건물 2층 223호·224호·복도 (11/8 실측)"의 **재생**을 누릅니다. 빈 방 기준선을 계산하느라 시작까지 30초쯤 걸립니다.
+3. 위쪽 메뉴 **실험 진행**으로 돌아가 도면을 봅니다. 처음 50초쯤은 세 구역이 모두 "뚜렷한 변화 없음"이고, 사람이 223호에 들어서는 55초쯤부터 223호만 "신호 변화 큼"으로 바뀌며 근거가 함께 나옵니다.
+
+알아 둘 점
+
+- 재생은 11/8에 실제 건물에서 녹화한 신호를 서버가 그 자리에서 다시 처리하는 것입니다. 결과를 미리 정해 두지 않았고, 화면에는 "기록 재생 · 녹화 데이터"로 표시됩니다. 녹화 구간과 실제로 있었던 일은 [sample_data/README.md](sample_data/README.md)에 있습니다.
+- 무료 서버라 15분 동안 쓰지 않으면 잠듭니다. 처음 접속하면 깨우는 데 1분쯤 걸릴 수 있습니다.
+- 배포본은 1단계(빈 방 대비 신호 변화)로 판정합니다. 그래서 화면 문구가 "사람 있음"이 아니라 "신호 변화 큼"으로 나옵니다. 이유는 아래 "AI가 하는 일"에 적었습니다.
 - push할 때마다 GitHub Actions가 테스트를 돌립니다(`.github/workflows/ci.yml`).
 
 ## 이 저장소에 있는 것
@@ -74,6 +84,11 @@ tests/               단위·API 통합 테스트
 모델 파일이 없으면 1단계만 동작하고, 화면 문구가 "사람 기척"이 아니라 "신호 변화"로 바뀝니다.
 검증하지 않은 판별을 사람이라고 부르지 않기 위해서입니다.
 
+지금 저장소에는 모델 파일을 넣지 않았고, 시연 영상과 배포본은 1단계로 판정합니다.
+11/7 현장 측정 다섯 회차를 한 회차씩 빼고 학습해 뺀 회차를 맞히게 했더니, 2단계는 틀린 경보를 줄이는 대신 사람을 더 놓쳤습니다
+(4차: 사람이 있는 2초 구간을 찾은 비율 0.85 → 0.46, 빈 방 구간에서 틀린 비율 0.03 → 0.00. 다섯 회차 모두 1단계가 사람을 더 많이 찾음).
+구조에서는 놓치는 쪽이 더 위험하다고 보고 1단계를 골랐습니다. 2단계는 데이터가 더 쌓이면 다시 검증해 켭니다.
+
 실시간 판단은 접속 여부와 별도로 마지막 유효 판단의 시각을 확인합니다. 통신이 이어져도 유효 판단이 6초 넘게 갱신되지 않으면 그 노드와 구역은 판단 불가로 표시합니다. 종료된 상황과 재생 완료 화면은 마지막 기록을 유지합니다.
 
 보정 시간이 끝나면 별도 작업이 기준선을 계산하므로 수집·조회 요청이 계산을 기다리지 않습니다. 계산 중에는 보정 상태가 `running`으로 유지되며, 새로 들어온 프레임은 `accepted: 0, reason: processing`으로 응답합니다(이미 확보한 보정 구간에 섞지 않음). 명시적 보정 끝내기(`/calibration/stop`)는 완료를 기다립니다. 계산 도중 새 보정·경보·보드 재시작이 발생하면 해당하는 옛 결과는 적용하지 않습니다.
@@ -87,7 +102,7 @@ tests/               단위·API 통합 테스트
 ### 검증 방법
 
 학습 명령이 검증까지 한 번에 하고 결과를 모델 카드(`models/presence_model.card.json`)로 저장합니다.
-웹의 "AI 검증" 화면은 이 파일을 그대로 보여 줍니다. 숫자를 손으로 옮겨 적지 않습니다.
+서버의 `/api/model/card`가 이 파일을 그대로 돌려줍니다. 숫자를 손으로 옮겨 적지 않습니다.
 
 - 수집한 날 하나를 통째로 빼고 학습해 그날로 평가합니다(leave-one-day-out). 같은 날 창을 섞어 나누면 이웃한 창끼리 거의 같아서 점수가 부풀려집니다.
 - 같은 데이터로 1단계만 쓴 경우, 다른 날 기준선을 그대로 쓴 경우(재보정 없음)를 함께 잽니다.
@@ -173,7 +188,7 @@ python tools/collector.py session --plan docs/plans/day_plan.csv --day 2026-11-0
 python tools/collector.py compare --data ../data/sessions/2026-11-03
 
 # 학습·검증 → models/presence_model.joblib + presence_model.card.json
-python -m app.ml.train --data ../data/sessions --out models/presence_model.joblib --source-note "공학관 301·302호, 11/3~11/7 수집"
+python -m app.ml.train --data ../data/sessions --out models/presence_model.joblib --source-note "2층 223·224호·복도, 11/7 수집"
 ```
 
 무선 노드를 게이트웨이로 받을 때는 포트 자리에 `gw:<노드 MAC>`을 쓰고 `--gateway COM7`을 붙입니다. 저장소 루트의 `nodes.csv`에 이름표와 MAC을 적어 두면 `--node RX-301=gw`처럼 이름으로 씁니다. 펌웨어 올리기와 무선 점검은 [docs/WIRELESS.md](docs/WIRELESS.md)에 있습니다.
@@ -218,6 +233,10 @@ python -m app.ml.train --data ../data/sessions --out models/presence_model.jobli
 3. 환경변수를 넣습니다: `DATABASE_URL`(Neon), `DEMO_PASSWORD`, `CORS_ORIGINS`(Vercel 주소). `SECRET_KEY`는 Blueprint가 만들어 줍니다.
 4. 배포가 끝나면 `https://<서비스>.onrender.com/api/health`와 `/api/model/card`를 열어 확인합니다.
 
+지금 배포본은 `DATABASE_URL`을 비워 SQLite로 돌립니다. 무료 서버가 잠들었다 깨면 처음 상태로 돌아가고, 테스트 계정은 켜질 때마다 다시 만들어집니다. 녹화 재생만 보여 주는 용도라 이렇게 했고, 건물 설정을 남겨야 하면 Neon을 붙입니다.
+
+무료 서버는 CPU가 0.1개라 `Dockerfile`에서 계산 스레드를 1개로 묶었습니다. 묶지 않으면 스레드끼리 기다리느라 녹화 재생의 기준선 계산이 몇 분씩 걸립니다.
+
 무료 인스턴스는 15분 동안 요청이 없으면 잠들고, 깨우는 데 1분 가까이 걸립니다. 프론트엔드는 이때 "서버를 깨우는 중"을 표시하고 다시 시도합니다.
 창 버퍼를 메모리에 두므로 워커는 하나만 띄웁니다(`Dockerfile` 참고).
 
@@ -246,12 +265,14 @@ python -m app.ml.train --data ../data/sessions --out models/presence_model.jobli
 
 - ESP32 펌웨어: Espressif [esp-csi](https://github.com/espressif/esp-csi)(Apache-2.0). 송신은 csi_send 예제를 수정 없이 쓰고, 무선 수신 노드(`firmware/csi_node`)는 csi_recv 예제의 측정 부분을 그대로 두고 전송 부분을 바꿨습니다. 게이트웨이(`firmware/csi_gateway`)와 노드·게이트웨이 데이터 형식은 직접 만들었습니다. 이득 보정은 Espressif의 esp_csi_gain_ctrl 부품을 씁니다
 - FastAPI, Uvicorn, SQLAlchemy, Pydantic, psycopg, NumPy, SciPy, scikit-learn, joblib, pyserial (각 프로젝트 라이선스를 따름)
-- 개발 과정에서 AI 코딩 도구를 썼습니다. 어느 부분에 어떻게 썼는지는 발표 자료 부록과 Notion "AI 활용 기록"에 적습니다.
+- 개발 과정에서 AI 코딩 도구를 썼습니다. 어느 부분에 어떻게 썼는지는 발표 자료의 "AI 활용" 장과 Notion "AI·Agent 활용 기록"에 적습니다.
 
 ## 알려진 한계
 
 - 사람 판별 성능은 팀이 수집한 데이터의 범위(건물·인원·날짜)만큼만 보장됩니다. 숫자는 AI 검증 화면의 모델 카드를 기준으로 합니다.
 - 실제 불꽃이 만드는 신호 흔들림은 아직 검증하지 못했습니다.
 - 노드가 불에 타거나 전원이 끊기면 그 구역은 "판단 불가"가 됩니다. 노드 전원·내열 설계는 설치 단계 과제입니다.
-- 화재 수신기에 붙일 연동 장치는 만들지 않았습니다. 경보 API까지만 있고, 시연에서는 이 API를 직접 부릅니다(발표 자료 부록 1).
+- 화재 수신기에 붙일 연동 장치는 만들지 않았습니다. 경보 API까지만 있고, 시험에서는 이 API를 직접 부릅니다.
+- 가만히 누워 있거나 앉은 사람은 아직 다 찾지 못합니다(11/10 측정에서 40초 구간 28개 중 12개). 그래서 감지되지 않은 구역을 "사람 없음"으로 표시하지 않습니다.
+- 판정은 빈 방과 달라졌는지를 봅니다. 가구를 옮기면 사람이 없어도 변화로 잡히고, 빈 방을 확인해 다시 보정하면 풀립니다.
 - 서버 한 대, 워커 하나 기준입니다. 건물 여러 곳을 동시에 처리하는 규모는 고려하지 않았습니다.
