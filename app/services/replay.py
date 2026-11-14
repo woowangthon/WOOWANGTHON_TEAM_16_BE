@@ -21,7 +21,7 @@ from sqlalchemy import select
 from ..config import settings
 from ..db import SessionLocal
 from ..ml.baseline import BaselineError, fit_baseline
-from ..ml.csi import Frame, frames_to_arrays, read_session_csv
+from ..ml.csi import Frame, frames_to_arrays, read_session
 from ..models import Building, Event, Incident, Node, Zone, utcnow
 from .stream import hub
 
@@ -170,14 +170,14 @@ class ReplayRunner:
                     node = db.scalar(select(Node).where(Node.building_id == building.id, Node.name == sn.name))
                     if sn.calibration is None or sn.stream is None:
                         raise ReplayError(f"{sn.name}: calibration·stream 파일이 필요합니다.")
-                    cal = read_session_csv(sn.calibration)
+                    cal = read_session(sn.calibration)
                     t, rssi, amp = frames_to_arrays(cal)
                     try:
                         base = fit_baseline(t, rssi, amp, settings.window_seconds, settings.context_seconds)
                     except BaselineError as exc:
                         raise ReplayError(f"{sn.name} 기준선 실패: {exc}") from exc
                     hub.store_baseline(db, node, base)
-                    frames = sorted(read_session_csv(sn.stream), key=lambda f: f.t)
+                    frames = sorted(read_session(sn.stream), key=lambda f: f.t)
                     if not frames:
                         raise ReplayError(f"{sn.name}: stream 파일에 프레임이 없습니다.")
                     streams[node.id] = frames

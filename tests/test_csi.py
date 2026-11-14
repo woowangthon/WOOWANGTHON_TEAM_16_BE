@@ -1,7 +1,15 @@
 import numpy as np
 import pytest
 
-from app.ml.csi import CsiFormatError, iq_to_amplitude, parse_esp_csi_line, read_session_csv
+from app.ml.csi import (
+    CsiFormatError,
+    frames_to_arrays,
+    iq_to_amplitude,
+    pack_session_csv,
+    parse_esp_csi_line,
+    read_session,
+    read_session_csv,
+)
 
 HEADER = ("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,"
           "sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,len,"
@@ -53,3 +61,32 @@ def test_read_both_file_formats(tmp_path):
     )
     frames = read_session_csv(raw_log)
     assert [round(f.t, 3) for f in frames] == [0.0, 0.02]
+
+
+def test_packed_session_matches_csv(tmp_path):
+    # 묶음 파일(.npz)은 CSV와 같은 값을 담아야 한다. 길이가 다른 줄은 양쪽 모두에서 빠진다.
+    src = tmp_path / "s.csv"
+    src.write_text(
+        't,rssi,data\n'
+        '1794122335.0612,-53.0,"[3,4,0,1,-1317,1101]"\n'
+        '1794122335.0731,-54.0,"[3,4,0,2,5,-12]"\n'
+        '1794122335.0850,-53.0,"[1,2,3,4]"\n'
+        '1794122335.0969,,"[0,0,7,-24,9,40]"\n',
+        encoding="utf-8",
+    )
+    packed = tmp_path / "s.npz"
+    assert pack_session_csv(src, packed) == (3, 1)
+
+    t0, rssi0, amp0 = frames_to_arrays(read_session_csv(src))
+    t1, rssi1, amp1 = frames_to_arrays(read_session(packed))
+    assert np.array_equal(t0, t1)
+    assert np.array_equal(rssi0, rssi1, equal_nan=True)
+    assert np.array_equal(amp0, amp1)
+    assert read_session(src)[0].t == read_session_csv(src)[0].t
+
+
+def test_packed_session_rejects_empty_csv(tmp_path):
+    src = tmp_path / "empty.csv"
+    src.write_text("t,rssi,data\n", encoding="utf-8")
+    with pytest.raises(CsiFormatError):
+        pack_session_csv(src, tmp_path / "empty.npz")

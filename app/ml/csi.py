@@ -195,6 +195,62 @@ def read_session_csv(path: str | Path, nominal_fps: float = 50.0) -> list[Frame]
     return frames
 
 
+def pack_session_csv(csv_path: str | Path, npz_path: str | Path) -> tuple[int, int]:
+    """수집 도구 형식 CSV(t,rssi,data)를 묶음 파일(.npz)로 옮겨 적는다. (옮긴 줄 수, 버린 줄 수)를 돌려준다.
+
+    값은 바꾸지 않는다. t는 float64, rssi는 float32, data는 보드가 보낸 정수 그대로 int16으로 담는다
+    (이득 보정을 거친 값이라 한 바이트 범위를 넘는다).
+    글자 CSV는 수십 MB를 한 줄씩 풀어야 해서 작은 서버에서 재생을 시작하는 데 몇 분이 걸린다.
+    길이가 다른 줄은 frames_to_arrays가 어차피 버리므로 여기서도 가장 많은 길이만 남긴다.
+    """
+    ts: list[float] = []
+    rssis: list[float] = []
+    rows: list[list[int]] = []
+    with Path(csv_path).open("r", encoding="utf-8", errors="replace") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                raw = _parse_int_list(row["data"])
+                t = float(row["t"])
+                rssi = float(row.get("rssi") or "nan")
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not raw or len(raw) % 2 or min(raw) < -32768 or max(raw) > 32767:
+                continue
+            ts.append(t)
+            rssis.append(rssi)
+            rows.append(raw)
+    if not rows:
+        raise CsiFormatError(f"{csv_path}: 옮길 프레임이 없습니다.")
+    lengths, counts = np.unique([len(r) for r in rows], return_counts=True)
+    width = int(lengths[np.argmax(counts)])
+    keep = [i for i, r in enumerate(rows) if len(r) == width]
+    np.savez_compressed(
+        npz_path,
+        t=np.array([ts[i] for i in keep], dtype=np.float64),
+        rssi=np.array([rssis[i] for i in keep], dtype=np.float32),
+        data=np.array([rows[i] for i in keep], dtype=np.int16),
+    )
+    return len(keep), len(rows) - len(keep)
+
+
+def read_session_npz(path: str | Path) -> list[Frame]:
+    """pack_session_csv가 만든 묶음 파일을 읽는다. 진폭 계산은 iq_to_amplitude와 같은 식이다."""
+    with np.load(Path(path)) as z:
+        t = np.asarray(z["t"], dtype=np.float64)
+        rssi = np.asarray(z["rssi"], dtype=np.float64)
+        raw = np.asarray(z["data"], dtype=np.float64)
+    if raw.ndim != 2 or raw.shape[0] != t.size or rssi.size != t.size or raw.shape[1] == 0 or raw.shape[1] % 2:
+        raise CsiFormatError(f"{path}: 묶음 파일의 모양이 맞지 않습니다.")
+    amp = np.abs(raw[:, 1::2] + 1j * raw[:, 0::2])
+    return [Frame(float(t[i]), float(rssi[i]), amp[i]) for i in range(t.size)]
+
+
+def read_session(path: str | Path) -> list[Frame]:
+    """확장자를 보고 묶음 파일(.npz)이나 CSV를 읽는다."""
+    path = Path(path)
+    return read_session_npz(path) if path.suffix.lower() == ".npz" else read_session_csv(path)
+
+
 def frames_to_arrays(frames: Iterable[Frame], n_subcarriers: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """프레임 목록을 (t, rssi, amp[T,S]) 배열로. 서브캐리어 수가 다른 프레임은 버린다."""
     frames = list(frames)
